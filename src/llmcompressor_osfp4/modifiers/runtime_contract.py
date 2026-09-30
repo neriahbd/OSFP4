@@ -10,8 +10,16 @@ from torch.nn import Module
 __all__ = ["attach_osfp4_runtime_contract"]
 
 
-def _mark_saved_config(save_directory: str | os.PathLike) -> None:
-    """Atomically mark the saved config for the OSFP4 runtime."""
+def _mark_saved_config(
+    save_directory: str | os.PathLike, osfp4_metadata: dict
+) -> None:
+    """Atomically mark the saved config for the OSFP4 runtime.
+
+    The metadata is written explicitly rather than relying on the saved config
+    to carry it: llm-compressor's ``resave_config`` replaces ``config.json``
+    with the model's original config, dropping attributes added to
+    ``model.config`` after loading.
+    """
     config_path = Path(save_directory) / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     quantization_config = config.get("quantization_config")
@@ -20,6 +28,7 @@ def _mark_saved_config(save_directory: str | os.PathLike) -> None:
     ) not in ("compressed-tensors", "osfp4"):
         raise ValueError("Expected a compressed-tensors or osfp4 quantization_config")
     quantization_config["quant_method"] = "osfp4"
+    config["osfp4_metadata"] = osfp4_metadata
 
     mode = stat.S_IMODE(config_path.stat().st_mode)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -62,7 +71,7 @@ def attach_osfp4_runtime_contract(
                 "Save the completed checkpoint locally, then upload that folder."
             )
         result = save_pretrained(save_directory, *args, **kwargs)
-        _mark_saved_config(save_directory)
+        _mark_saved_config(save_directory, model.config.osfp4_metadata)
         return result
 
     model.save_pretrained = save_pretrained_osfp4
