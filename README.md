@@ -1,38 +1,70 @@
-# llmcompressor-osfp4
+# OSFP4
 
-OSFP4 (optimized-scale NVFP4) quantization for
-[LLM Compressor](https://github.com/vllm-project/llm-compressor), packaged as a
-plugin that runs on the **unmodified upstream release**. It provides
-`OSFP4Modifier` (A4W4 `NVFP4` and weight-only `NVFP4A16`, with RTN or SIC scale
-optimization) and the `"osfp4"` observer.
+OSFP4 is an optimized-scale NVFP4 quantization plugin for
+[LLM Compressor](https://github.com/vllm-project/llm-compressor). It adds
+`OSFP4Modifier`, which calibrates a model and learns better FP4 scales than
+plain round-to-nearest NVFP4. The result is a standard compressed-tensors
+checkpoint.
 
-## Supported versions
+Supported schemes:
+
+| Scheme | Weights | Activations |
+| --- | --- | --- |
+| `NVFP4` | FP4 | FP4 (A4W4) |
+| `NVFP4A16` | FP4 | 16-bit (weight-only) |
+
+Scale optimization modes:
+
+- **`sic`** (default): Hessian-aware. Quantizes block by block and propagates
+  the error. More accurate, slower.
+- **`rtn`**: faster. Uses a diagonal activation statistic.
+
+## Requirements
 
 | Component | Version |
 | --- | --- |
-| `llmcompressor` | **0.14.0** (exact pin) |
-| `compressed-tensors` | 0.19.0 (pinned by llmcompressor 0.14.0) |
-| `transformers` | >=5.15.0, <=5.17.0 |
-| `torch` | >=2.10.0, <=2.14.0 |
-| Python | >=3.10 |
+| Python | 3.10 or newer |
+| `llmcompressor` | 0.14.0 (installed automatically) |
+| `compressed-tensors` | 0.19.0 (installed automatically) |
+| `torch` | 2.10–2.14 |
+| `transformers` | 5.15–5.17 |
 
-The plugin subclasses llm-compressor internals (`Modifier`,
-`QuantizationMixin`, `Observer`), so it is pinned to one release. Other
-versions are not supported until the test suite passes against them.
+A CUDA GPU is recommended for real models. CPU works for small models and
+tests.
 
-## Install
+## Installation
+
+From GitHub:
 
 ```bash
-pip install "llmcompressor-osfp4 @ git+<this-repo-url>"
-# or, from a checkout
+pip install "llmcompressor-osfp4 @ git+https://github.com/neriahbd/OSFP4.git"
+```
+
+For development, install from a checkout:
+
+```bash
+git clone https://github.com/neriahbd/OSFP4.git
+cd OSFP4
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## Usage
+Check that it works:
+
+```bash
+python -c "from llmcompressor_osfp4 import OSFP4Modifier; print('ok')"
+```
+
+## Quick start
 
 ```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from llmcompressor import oneshot
 from llmcompressor_osfp4 import OSFP4Modifier
+
+model_id = "Qwen/Qwen3-0.6B"
+model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="bfloat16")
+tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 recipe = OSFP4Modifier(
     scheme="NVFP4",            # or "NVFP4A16"
@@ -44,70 +76,81 @@ recipe = OSFP4Modifier(
 oneshot(
     model=model,
     processor=tokenizer,
-    dataset=calibration_dataset,
+    dataset=calibration_dataset,   # any dataset supported by oneshot
     recipe=recipe,
     max_seq_length=2048,
-    num_calibration_samples=1024,
+    num_calibration_samples=512,
 )
-model.save_pretrained(save_dir, save_compressed=True)
+
+model.save_pretrained("Qwen3-0.6B-OSFP4", save_compressed=True)
+tokenizer.save_pretrained("Qwen3-0.6B-OSFP4")
 ```
 
-The sequential calibration pipeline is selected automatically.
-`OSFP4Modifier` must be the only modifier in the recipe.
+A complete, runnable version is [`examples/calibrate.py`](examples/calibrate.py).
 
-**YAML or string recipes:** run `import llmcompressor_osfp4` before loading
-the recipe. The import registers `OSFP4Modifier` with llm-compressor's
-`ModifierFactory`, so recipes can refer to it by name.
+Notes:
 
-For all options and the algorithm, see the
-[modifier README](src/llmcompressor_osfp4/modifiers/README.md) and the
-[optimization README](src/llmcompressor_osfp4/modifiers/optimization/README.md).
-Checkpoints are served with the matching `vllm-osfp4` plugin.
+- `OSFP4Modifier` must be the only modifier in the recipe.
+- OSFP4 automatically uses llm-compressor's sequential calibration pipeline.
+- Save the checkpoint locally first. `save_pretrained(push_to_hub=True)` is
+  not supported; upload the saved folder afterwards.
+- To load YAML or string recipes that refer to `OSFP4Modifier` by name, run
+  `import llmcompressor_osfp4` first.
 
-## Examples
+## Options
 
-See [`examples/`](examples/README.md):
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `scheme` | — | `"NVFP4"` or `"NVFP4A16"`. |
+| `optimization_mode` | `"sic"` | `"sic"` or `"rtn"`. |
+| `targets` | `["Linear"]` | Modules to quantize. |
+| `ignore` | `[]` | Modules to skip (usually `["lm_head"]`). |
+| `steps` | `80` | Adam steps for scale optimization. |
+| `lr` | `0.12` | Adam learning rate. |
+| `dampening_frac` | `0.01` | Hessian damping for SIC. |
+| `offload_hessians` | `False` | Keep Hessians on the CPU between uses to save GPU memory. |
+| `activation_subsample_size` | `16384` | Cap on the activation rows used in the loss; `None` uses all rows. |
 
-- a minimal calibration script
-- the NestQuant WikiText-2 perplexity protocol
-- FP-Quant Table 1 and Table 7 reproductions
+The [modifier README](src/llmcompressor_osfp4/modifiers/README.md) explains the
+algorithm and failure behavior. The
+[optimization README](src/llmcompressor_osfp4/modifiers/optimization/README.md)
+explains the RTN and SIC math.
 
-Run them from the repository root, for example
-`python examples/calibrate.py`.
+## Serving
 
-## Tests
+Checkpoints are saved with `quant_method="osfp4"`. Layers that need runtime
+activation smoothing store a BF16 `smooth_quant_scale`, and the checkpoint
+config lists them in `osfp4_metadata`. To serve these checkpoints in vLLM, use
+the matching `vllm-osfp4` plugin.
+
+## Repository contents
+
+```
+src/llmcompressor_osfp4/
+  modifiers/        OSFP4Modifier: calibration, smoothing, deployment
+    optimization/   RTN and SIC scale optimization
+  observers/        "osfp4" observer: FP4 math, losses, E4M3 scale selection
+examples/
+  calibrate.py      minimal end-to-end calibration
+  wikitext_ppl/     WikiText-2 perplexity calibration and evaluation
+  fpquant/          FP-Quant Table 1 (Llama 3.1 8B) and Table 7 (Qwen3-8B)
+tests/              unit, integration, and golden-output tests
+```
+
+Run the examples from the repository root. Each example folder has its own
+README with the exact commands.
+
+## Running tests
 
 ```bash
+pip install -e ".[dev]"
 python -m pytest -ra tests
 ```
 
-CUDA tests skip when CUDA is unavailable. `tests/test_golden.py` compares the
-plugin's outputs byte for byte with fixtures captured from the original fork.
-The committed fixtures cover `NVFP4` and `NVFP4A16`, each with RTN and SIC.
-They were generated with the fork at `fc1a72f` on compressed-tensors
-`0.18.1a20260910`, torch 2.12.0 and transformers 5.12.1 (CPU, Python 3.12).
-To regenerate them, run this in an environment with the fork installed:
-
-```bash
-python tests/golden/generate_golden.py --output tests/golden/fixtures
-```
-
-## Provenance
-
-Ported from the `neriahbd/llmcompressor-osfp4` fork. That fork was based on
-upstream llm-compressor `main` shortly after the 0.12.0 release
-(compressed-tensors 0.17.1). The OSFP4 algorithms are unchanged. The port made
-these changes:
-
-- **Packaging:** the modules moved from `llmcompressor.modifiers.osfp4` and
-  `llmcompressor.observers.osfp4` to `llmcompressor_osfp4.modifiers` and
-  `llmcompressor_osfp4.observers`.
-- **Pipeline selection:** the fork patched upstream's `pipelines/registry.py`.
-  The plugin instead sets `OSFP4Modifier.requires_calibration_data = True`,
-  which llm-compressor 0.14.0 uses to infer the pipeline.
-- **Recipes:** `OSFP4Modifier` is registered with `ModifierFactory` so recipes
-  can refer to it by name.
+CUDA tests are skipped automatically when no GPU is available.
+`tests/test_golden.py` checks that calibration outputs match stored reference
+tensors byte for byte.
 
 ## License
 
-Apache-2.0, like LLM Compressor. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
