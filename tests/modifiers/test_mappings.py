@@ -142,6 +142,7 @@ def _mapping_fixture_for_architecture(architecture):
     elif architecture in {
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
+        "Glm4MoeLiteForCausalLM",
         "GlmMoeDsaForCausalLM",
     }:
         block = _deepseek_mapping_block()

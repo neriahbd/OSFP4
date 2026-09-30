@@ -83,7 +83,10 @@ python -m pytest -ra tests
 
 CUDA tests skip when CUDA is unavailable. `tests/test_golden.py` compares the
 plugin's outputs byte for byte with fixtures captured from the original fork.
-To regenerate the fixtures, run this in an environment with the fork installed:
+The committed fixtures cover `NVFP4` and `NVFP4A16`, each with RTN and SIC.
+They were generated with the fork at `fc1a72f` on compressed-tensors
+`0.18.1a20260910`, torch 2.12.0 and transformers 5.12.1 (CPU, Python 3.12).
+To regenerate them, run this in an environment with the fork installed:
 
 ```bash
 python tests/golden/generate_golden.py --output tests/golden/fixtures

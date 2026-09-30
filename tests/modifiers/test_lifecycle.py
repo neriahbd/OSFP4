@@ -129,7 +129,7 @@ def test_mapping_optimization_reuses_first_balance_layer_observer(monkeypatch):
     expected_observer(mapping.balance_layers[0].weight)
     min_vals = expected_observer.min_vals.detach().clone()
     max_vals = expected_observer.max_vals.detach().clone()
-    fusions = tuple(expected_observer._fusions.items())
+    fusions = tuple(expected_observer.fusion_handler._group)
     assert fusions
     original = osfp4_quantize.optimize_sic
     seen = []
@@ -144,7 +144,7 @@ def test_mapping_optimization_reuses_first_balance_layer_observer(monkeypatch):
     assert seen == [expected_observer]
     assert torch.equal(expected_observer.min_vals, min_vals)
     assert torch.equal(expected_observer.max_vals, max_vals)
-    assert tuple(expected_observer._fusions.items()) == fusions
+    assert tuple(expected_observer.fusion_handler._group) == fusions
     assert mapping.mapping_name in modifier._optimized_mapping_names
     modifier.remove_hooks()
 

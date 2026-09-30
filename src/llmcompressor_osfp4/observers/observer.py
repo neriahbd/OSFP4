@@ -3,7 +3,7 @@ from typing import NamedTuple
 import torch
 from loguru import logger
 
-from ..base import Observer
+from llmcompressor.observers.base import Observer
 from .loss import (
     build_joint_loss_coefficients,
     build_weight_loss_coefficients,
