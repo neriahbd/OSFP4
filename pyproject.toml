@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmcompressor-osfp4"
+version = "0.1.0"
+description = "OSFP4 (optimized-scale NVFP4) quantization modifier and observer for LLM Compressor"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    # Pinned: OSFP4 subclasses llm-compressor internals (Modifier,
+    # QuantizationMixin, Observer) whose contracts change between releases.
+    "llmcompressor==0.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.3",
+    "pytest-mock>=3.6.0",
+    "safetensors",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
