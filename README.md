@@ -140,6 +140,36 @@ VLLM_PLUGINS=osfp4 vllm serve ./Qwen3-0.6B-OSFP4
 Saved checkpoints declare `quant_method="osfp4"`; vLLM selects it automatically.
 Save locally with `save_pretrained(..., save_compressed=True)` before uploading.
 
+## Performance
+
+Mean accuracy (%) of Llama-3.1-8B-Instruct, averaged over WinoGrande,
+HellaSwag, GSM8K and MMLU-CoT. **Bold** marks the best quantized result in each
+group. The BF16 (unquantized) baseline scores **79.22**.
+
+**W4A4, absmax activation scaling**
+
+| Method | Avg. |
+| --- | ---: |
+| RTN (FP-Quant) | 75.65 |
+| GPTQ (FP-Quant) | 76.34 |
+| MR-GPTQ (FP-Quant) | 76.18 |
+| SOAR | 76.60 |
+| H-Scale (W4A4 extension) | 76.67 |
+| NVIDIA released checkpoint | 76.11 |
+| OSFP4 W-RTN / X-RTN | 76.36 |
+| OSFP4 W-SIC / X-RTN | **77.03** |
+
+**W4A16, weights only**
+
+| Method | Avg. |
+| --- | ---: |
+| RTN | 77.67 |
+| H-Scale | 78.00 |
+| OSFP4 W-RTN | 78.15 |
+| OSFP4 W-SIC | **78.42** |
+
+The full experimental setup and additional experiments are in the paper.
+
 ## Documentation and license
 
 The [modifier README](src/llmcompressor_osfp4/modifiers/README.md) explains the
