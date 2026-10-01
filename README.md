@@ -122,6 +122,9 @@ Stock vLLM cannot load OSFP4 checkpoints. Serve them with the
 [vllm-osfp4](https://github.com/neriahbd/vllm-osfp4) plugin, which needs
 vLLM 0.24–0.28 and a CUDA GPU with NVFP4 support.
 
+See the [vllm-osfp4 README](https://github.com/neriahbd/vllm-osfp4#readme)
+for installation, checkpoint requirements, and serving instructions.
+
 Some layers, such as `o_proj` and `down_proj`, have no preceding layer to
 absorb their smoothing scale. OSFP4 stores that scale in the checkpoint as
 `smooth_quant_scale`, and the plugin multiplies it into the layer's input before
