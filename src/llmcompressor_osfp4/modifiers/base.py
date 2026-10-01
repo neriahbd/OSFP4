@@ -66,8 +66,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
 
     # Configuration
 
-    # OSFP4 always calibrates, including weight-only schemes, so pipeline
-    # inference selects the sequential pipeline.
+    # Calibration is always required, so pipeline inference selects sequential.
     requires_calibration_data: bool = True
     optimization_mode: Literal["rtn", "sic"] = "sic"
     steps: int = 80
@@ -92,10 +91,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         default_factory=dict
     )
 
-    # 1. Initialization
-    # Check usability, resolve targets and mappings, then reset temporary state.
-    # Target lookup resolves the quantization configuration lazily. Finally,
-    # configure Hessian offloading and initialize shared quantization state.
+    # 1. Initialization: resolve mappings, reset state, and initialize quantization.
 
     def on_initialize(self, state: State, **kwargs) -> bool:
         self._require_usable()
@@ -211,10 +207,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         self._remove_runtime_smoothing_hooks()
         self._finalization_complete = False
 
-    # 2. Calibration setup
-    # Attach shared observers, then create and register mapping capture hooks.
-    # After this callback, the external sequential pipeline runs forward passes
-    # that trigger capture() in calibration_cache.py.
+    # 2. Calibration setup: register capture hooks for sequential forward passes.
 
     @staticmethod
     def _calibration_token_count(dataloader) -> int | None:
@@ -316,13 +309,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
                 "forward_pre",
             )
 
-    # 3. Optimization after each subgraph
-    # Select observed unfinished mappings, sample inputs, then optimize and deploy.
-    # quantize_mapping() optimizes, applies smoothing, and replays A4W4 inputs;
-    # deployment then installs parameters and adds runtime hooks when needed.
-    # Mark each mapping completed and release its cache after successful deployment.
-    # The external pipeline propagates outputs when enabled, then repeats for
-    # the next subgraph.
+    # 3. Optimization after each subgraph: sample, optimize, deploy, and clear caches.
 
     def on_sequential_epoch_end(
         self,
@@ -360,8 +347,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         if subsample_size is None:
             return None
 
-        # Sampling reads CPU cache rows directly, so synchronize D2H capture
-        # events on the host before gathering from pinned buffers.
+        # Synchronize D2H capture before sampling CPU rows from pinned buffers.
         self._calibration.wait(mapping.mapping_name, torch.device("cpu"))
         output_rows = sum(layer.weight.shape[0] for layer in mapping.balance_layers)
         if mapping.mapping_name in self._calibration.sample_indices:
@@ -451,9 +437,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
             scale_input
         )
 
-    # 4. Calibration completion
-    # Remove calibration hooks, verify completion, update optional KV parameters,
-    # then freeze quantization.
+    # 4. Calibration completion: remove hooks, verify coverage, and freeze quantization.
 
     def on_calibration_end(self, state: State, event: Event, **kwargs):
         self.remove_hooks()
@@ -470,9 +454,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
             update_qparams(kv_modules, ("q", "k", "v"))
         QuantizationMixin.end_calibration(self, state.model)
 
-    # 5. Finalization
-    # Verify usability and completion, attach the runtime contract, remove runtime
-    # hooks, clear caches and mappings, then mark finalization complete.
+    # 5. Finalization: attach the runtime contract, remove hooks, and clear state.
 
     def on_finalize(self, state: State, **kwargs) -> bool:
         if self._finalization_complete:
@@ -493,11 +475,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         self._finalization_complete = True
         return True
 
-    # 6. Shared cleanup and guards (reused helpers, not another pipeline stage)
-    # Initialization and finalization remove runtime hooks. Calibration completion
-    # and finalization verify coverage. Initialization, optimization, and completion
-    # checks reject reuse after a deployment failure; deployment also uses the
-    # shared failure message when reporting an error.
+    # 6. Shared cleanup and guards: remove hooks, verify coverage, and reject failed reuse.
 
     def _remove_runtime_smoothing_hooks(self) -> None:
         """Remove runtime scale hooks without removing checkpoint state."""
@@ -529,9 +507,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
             "a fresh OSFP4Modifier; this modifier cannot be retried."
         )
 
-    # 7. Reporting
-    # Callers can inspect sampling provenance through this accessor; the
-    # optimization pipeline does not call it.
+    # 7. Reporting: expose sampling provenance for callers.
 
     @property
     def activation_subsampling_records(self) -> dict[str, dict[str, int | str]]:
