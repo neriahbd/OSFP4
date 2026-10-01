@@ -11,8 +11,8 @@ To expand the fixed-cap matrix, add::
     --caps 1 3 16 32 128 256 8192 16384 65536 \
     --rows 256 16512 --dtypes float32 float16 bfloat16
 
-The worker also compares candidate auto sampling against an explicit input-width
-cap. No models or datasets are downloaded. Raw tensor bytes, source identities,
+The worker also compares candidate auto sampling against an explicit cap of twice
+the input width. No models or datasets are downloaded. Raw tensor bytes, source identities,
 dependency versions, checkpoint configs, and provenance are retained for review.
 """
 
@@ -85,7 +85,7 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
         record = self.activation_subsampling_records[mapping.mapping_name]
         n = mapping.balance_layers[0].weight.shape[1]
         assert record["k1"] == rows
-        assert record["k"] == min(rows, n if cap == "auto" else cap)
+        assert record["k"] == min(rows, 2 * n if cap == "auto" else cap)
         if cap == "auto":
             assert record["policy"] == "auto" and record["n"] == n
         else:
@@ -192,7 +192,7 @@ def worker(source, output, candidate, caps, row_counts, dtypes):
                         run_case(output / name, mode, streaming, rows, cap, dtype)
                         print(f"Completed {name}", flush=True)
                 if candidate:
-                    for cap in ("auto", 32):
+                    for cap in ("auto", 64):
                         name = f"width-{dtype}-{mode}-{streaming}-{cap}"
                         run_case(
                             output / name,
@@ -290,7 +290,7 @@ def main():
         for mode in ("rtn", "sic"):
             for streaming in (False, True):
                 report[f"auto-{dtype}-{mode}-{streaming}"] = compare(
-                    args.output / "candidate" / f"width-{dtype}-{mode}-{streaming}-32",
+                    args.output / "candidate" / f"width-{dtype}-{mode}-{streaming}-64",
                     args.output
                     / "candidate"
                     / f"width-{dtype}-{mode}-{streaming}-auto",

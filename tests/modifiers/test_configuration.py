@@ -354,12 +354,12 @@ def test_unknown_activation_subsampling_policy_is_rejected():
 
 
 @pytest.mark.parametrize("width", [16, 32])
-def test_auto_uses_shared_input_width_not_combined_output_rows(width):
+def test_auto_uses_twice_shared_input_width_not_combined_output_rows(width):
     modifier = _OSFP4Modifier(scheme="NVFP4")
     mapping = OSFP4Mapping(
         "shared", None, (torch.nn.Linear(width, 3), torch.nn.Linear(width, 5))
     )
-    assert modifier._resolve_activation_subsample_size(mapping) == (width, width)
+    assert modifier._resolve_activation_subsample_size(mapping) == (2 * width, width)
 
 
 def test_auto_rejects_mixed_widths_before_registering_capture_hooks(mocker):

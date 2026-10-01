@@ -81,10 +81,10 @@ Scale optimization modes:
 | `lr` | `0.12` | Adam learning rate. |
 | `dampening_frac` | `0.01` | SIC Hessian damping fraction. |
 | `offload_hessians` | `False` | Keep SIC Hessians on the CPU between uses. |
-| `activation_subsample_size` | `"auto"` | Optimization row cap: mapping input width, an integer, or `None` for all rows. |
+| `activation_subsample_size` | `"auto"` | Optimization row cap: twice the mapping input width, an integer, or `None` for all rows. |
 
 `activation_subsample_size` defaults to `"auto"`, retaining
-`k = min(total_rows, mapping_input_width)` complete activation vectors per
+`k = min(total_rows, 2 * mapping_input_width)` complete activation vectors per
 mapping. The width is the layers' shared `weight.shape[1]`; MLP down projections
 use their intermediate input width.
 

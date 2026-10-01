@@ -44,10 +44,10 @@ A runnable example is [available here](../../../examples/calibrate.py).
 | `lr` | `0.12` | Adam learning rate. |
 | `dampening_frac` | `0.01` | SIC Hessian damping fraction. |
 | `offload_hessians` | `False` | Move the full Hessian to the GPU for each capture and back to CPU afterward. |
-| `activation_subsample_size` | `"auto"` | NVFP4 activation-loss row cap; auto uses the mapping's input width, an integer sets a fixed cap, and `None` uses every row. |
+| `activation_subsample_size` | `"auto"` | NVFP4 activation-loss row cap; auto uses twice the mapping's input width, an integer sets a fixed cap, and `None` uses every row. |
 
 Auto defines `n = weight.shape[1]` for the mapping's balance layers and retains
-`k = min(total_rows, n)` complete activation vectors. Shared projections must
+`k = min(total_rows, 2 * n)` complete activation vectors. Shared projections must
 have the same input width; their output widths do not affect the cap. The sample
 is selected once using seed 42 and reused throughout optimization. Sampling
 records include `policy="auto"` and `n`. Explicit integer caps retain the

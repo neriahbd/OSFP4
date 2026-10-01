@@ -296,17 +296,18 @@ def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode
             assert_bytes(after[name], before[name], name)
 
 
-@pytest.mark.parametrize("rows", [7, 80])
+@pytest.mark.parametrize("rows", [7, 24, 48, 80])
 @pytest.mark.parametrize("width", [16, 32])
-def test_auto_matches_fixed_input_width_for_streaming_and_fallback(rows, width):
+def test_auto_matches_fixed_twice_input_width_for_streaming_and_fallback(rows, width):
     values = torch.randn(1, rows, 16, generator=torch.Generator().manual_seed(11))
     snapshots = []
     for streaming in (False, True):
-        for cap in ("auto", width):
+        for cap in ("auto", 2 * width):
             torch.manual_seed(7)
             model = TinyModel()
+            options = {} if cap == "auto" else {"activation_subsample_size": cap}
             modifier = OSFP4Modifier(
-                scheme="NVFP4", ignore=["lm_head"], activation_subsample_size=cap
+                scheme="NVFP4", ignore=["lm_head"], **options
             )
             state = State(model=model)
             state.data.calib = [{"input_ids": torch.zeros(1, rows, dtype=torch.long)}]
@@ -337,7 +338,7 @@ def test_auto_matches_fixed_input_width_for_streaming_and_fallback(rows, width):
                         record = modifier.activation_subsampling_records[
                             mapping.mapping_name
                         ]
-                        assert record["k"] == min(rows, n)
+                        assert record["k"] == min(rows, 2 * n)
                         if cap == "auto":
                             assert record["policy"] == "auto" and record["n"] == n
                     records = modifier.activation_subsampling_records

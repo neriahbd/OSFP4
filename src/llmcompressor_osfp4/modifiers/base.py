@@ -395,7 +395,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
                 f"{sorted(input_widths)}"
             )
         input_width = input_widths.pop()
-        return input_width, input_width
+        return 2 * input_width, input_width
 
     def _deploy_mapping(
         self,
