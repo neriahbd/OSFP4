@@ -405,7 +405,9 @@ def test_default_none_and_full_cap_are_bit_exact_when_cap_reaches_k1(mode):
         assert any(name.endswith(required_suffix) for name in state_names)
     assert default_modifier.activation_subsampling_records
     assert all(
-        record["policy"] == "fixed" and record["k"] == record["k1"] == 6
+        record["policy"] == "auto"
+        and record["n"] in (16, 32)
+        and record["k"] == record["k1"] == 6
         for record in default_modifier.activation_subsampling_records.values()
     )
     assert none_modifier.activation_subsampling_records == {}

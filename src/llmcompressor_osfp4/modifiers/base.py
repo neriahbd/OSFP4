@@ -74,7 +74,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
     lr: float = 0.12
     dampening_frac: float = 0.01
     offload_hessians: bool = False
-    activation_subsample_size: int | None = 16384
+    activation_subsample_size: int | Literal["auto"] | None = "auto"
 
     _resolved_mappings: list[OSFP4Mapping] = PrivateAttr(default_factory=list)
     _calibration_dataloader: object = PrivateAttr(default=None)
@@ -286,10 +286,14 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
                 "OSFP4 cannot count calibration token rows; "
                 "using full activation caching"
             )
-        for mapping in self._resolved_mappings:
+        subsample_sizes = [
+            self._resolve_activation_subsample_size(mapping)[0]
+            for mapping in self._resolved_mappings
+        ]
+        for mapping, subsample_size in zip(self._resolved_mappings, subsample_sizes):
             streaming = (
                 expected_tokens is not None
-                and self.activation_subsample_size is not None
+                and subsample_size is not None
                 and not self._weight_only
                 and all(
                     type(getattr(layer, "input_observer", None)) is StaticMinMaxObserver
@@ -307,7 +311,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
                     cache_inputs=not self._weight_only,
                     capture_sigma_x_squared=self.optimization_mode == "rtn",
                     expected_tokens=expected_tokens if streaming else None,
-                    subsample_size=self.activation_subsample_size,
+                    subsample_size=subsample_size,
                 ),
                 "forward_pre",
             )
@@ -352,7 +356,8 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
     def _sample_optimization_inputs(
         self, mapping: OSFP4Mapping
     ) -> tuple[torch.Tensor, ...] | None:
-        if self.activation_subsample_size is None:
+        subsample_size, input_width = self._resolve_activation_subsample_size(mapping)
+        if subsample_size is None:
             return None
 
         # Sampling reads CPU cache rows directly, so synchronize D2H capture
@@ -366,13 +371,31 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         else:
             selection = subsample_activations(
                 self._calibration.inputs[mapping.mapping_name],
-                self.activation_subsample_size,
+                subsample_size,
                 output_rows=output_rows,
             )
-        self._activation_subsampling_records[mapping.mapping_name] = (
-            selection.provenance
-        )
+        provenance = selection.provenance.copy()
+        if input_width is not None:
+            provenance["policy"] = "auto"
+            provenance["n"] = input_width
+        self._activation_subsampling_records[mapping.mapping_name] = provenance
         return selection.batches
+
+    def _resolve_activation_subsample_size(
+        self, mapping: OSFP4Mapping
+    ) -> tuple[int | None, int | None]:
+        """Resolve the row cap and the input width recorded for auto sampling."""
+        if self.activation_subsample_size != "auto":
+            return self.activation_subsample_size, None
+        input_widths = {layer.weight.shape[1] for layer in mapping.balance_layers}
+        if len(input_widths) != 1:
+            raise ValueError(
+                f"OSFP4 mapping {mapping.mapping_name!r} cannot use auto activation "
+                "subsampling because its balance layers have different input widths: "
+                f"{sorted(input_widths)}"
+            )
+        input_width = input_widths.pop()
+        return input_width, input_width
 
     def _deploy_mapping(
         self,

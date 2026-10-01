@@ -353,6 +353,16 @@ def _checkpoint_manifest(
     }
 
 
+def _activation_subsample_size(value: str) -> int | str:
+    """Parse a fixed activation row cap or the mapping input-width policy."""
+    if value == "auto":
+        return value
+    try:
+        return int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected an integer or 'auto'") from error
+
+
 def calibrate_main(
     profile: BenchmarkProfile,
     *,
@@ -379,7 +389,9 @@ def calibrate_main(
     parser.add_argument("--save-dir", type=Path)
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--lr", type=float, default=0.12)
-    parser.add_argument("--activation-subsample-size", type=int, default=16_384)
+    parser.add_argument(
+        "--activation-subsample-size", type=_activation_subsample_size, default="auto"
+    )
     args = parser.parse_args()
     if args.save_dir is None:
         args.save_dir = (

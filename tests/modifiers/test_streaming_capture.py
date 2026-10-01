@@ -193,7 +193,8 @@ def test_existing_capture_fallback(fallback):
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mode", ["rtn", "sic"])
-def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode):
+@pytest.mark.parametrize("cap", [3, "auto"])
+def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode, cap):
     def collate(rows):
         ids = torch.nn.utils.rnn.pad_sequence(rows, batch_first=True)
         return {"input_ids": ids, "attention_mask": ids.ne(0).long()}
@@ -223,7 +224,7 @@ def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode
             ignore=["lm_head"],
             optimization_mode=mode,
             steps=1,
-            activation_subsample_size=3,
+            activation_subsample_size=cap,
         )
         loader = torch.utils.data.DataLoader(
             [torch.arange(1, n + 1) for n in (7, 5, 3)],
@@ -293,3 +294,65 @@ def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode
         assert before.keys() == after.keys()
         for name in before:
             assert_bytes(after[name], before[name], name)
+
+
+@pytest.mark.parametrize("rows", [7, 80])
+@pytest.mark.parametrize("width", [16, 32])
+def test_auto_matches_fixed_input_width_for_streaming_and_fallback(rows, width):
+    values = torch.randn(1, rows, 16, generator=torch.Generator().manual_seed(11))
+    snapshots = []
+    for streaming in (False, True):
+        for cap in ("auto", width):
+            torch.manual_seed(7)
+            model = TinyModel()
+            modifier = OSFP4Modifier(
+                scheme="NVFP4", ignore=["lm_head"], activation_subsample_size=cap
+            )
+            state = State(model=model)
+            state.data.calib = [{"input_ids": torch.zeros(1, rows, dtype=torch.long)}]
+            modifier.on_initialize(state)
+            modifier._resolved_mappings = [
+                mapping
+                for mapping in modifier._resolved_mappings
+                if mapping.balance_layers[0].weight.shape[1] == width
+            ]
+            with ExitStack() as stack:
+                if not streaming:
+                    stack.enter_context(
+                        patch.object(
+                            OSFP4Modifier, "_calibration_token_count", return_value=None
+                        )
+                    )
+                modifier.on_calibration_start(state, Event())
+                try:
+                    model(values)
+                    selected = {}
+                    for mapping in modifier._resolved_mappings:
+                        n = mapping.balance_layers[0].weight.shape[1]
+                        batches = modifier._sample_optimization_inputs(mapping)
+                        selected[mapping.mapping_name] = torch.cat(
+                            batches
+                            or modifier._calibration.inputs[mapping.mapping_name]
+                        )
+                        record = modifier.activation_subsampling_records[
+                            mapping.mapping_name
+                        ]
+                        assert record["k"] == min(rows, n)
+                        if cap == "auto":
+                            assert record["policy"] == "auto" and record["n"] == n
+                    records = modifier.activation_subsampling_records
+                    snapshots.append((streaming, cap, selected, records))
+                finally:
+                    modifier.remove_hooks()
+    auto_fallback, fixed_fallback, auto_streaming, fixed_streaming = snapshots
+    assert auto_fallback[3] == auto_streaming[3]
+    for auto, fixed in (
+        (auto_fallback, fixed_fallback),
+        (auto_streaming, fixed_streaming),
+    ):
+        for name, tensor in auto[2].items():
+            assert_bytes(tensor, fixed[2][name], name)
+            record = dict(auto[3][name])
+            del record["n"]
+            record["policy"] = "fixed"
+            assert record == fixed[3][name]

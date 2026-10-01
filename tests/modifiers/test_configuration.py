@@ -4,6 +4,7 @@ from compressed_tensors.quantization import QuantizationArgs, preset_name_to_sch
 
 from llmcompressor.core import Event, State
 from llmcompressor_osfp4.modifiers import OSFP4Modifier as _OSFP4Modifier
+from llmcompressor_osfp4.modifiers.base import OSFP4Mapping
 from llmcompressor_osfp4.observers import OSFP4Observer
 
 from ._testing import LlamaForCausalLM, make_osfp4_modifier, run_modifier
@@ -48,7 +49,7 @@ def test_nvfp4a16_configures_weight_only_observer(mode):
     }
 
 
-@pytest.mark.parametrize("activation_subsample_size", [1, 128, 8192])
+@pytest.mark.parametrize("activation_subsample_size", [1, 128, 8192, "auto", None])
 def test_nvfp4_accepts_activation_subsample_size(activation_subsample_size):
     modifier = _OSFP4Modifier(
         scheme="NVFP4",
@@ -58,7 +59,7 @@ def test_nvfp4_accepts_activation_subsample_size(activation_subsample_size):
     assert modifier.activation_subsample_size == activation_subsample_size
 
 
-@pytest.mark.parametrize("activation_subsample_size", [1, 8192])
+@pytest.mark.parametrize("activation_subsample_size", [1, 8192, "auto", None])
 def test_nvfp4a16_disables_activation_subsampling(activation_subsample_size):
     modifier = _OSFP4Modifier(
         scheme="NVFP4A16",
@@ -240,7 +241,7 @@ def test_public_configuration_defaults_are_canonical():
     assert modifier.lr == 0.12
     assert modifier.dampening_frac == 0.01
     assert modifier.offload_hessians is False
-    assert modifier.activation_subsample_size == 16384
+    assert modifier.activation_subsample_size == "auto"
     assert modifier.targets == ["Linear"]
     assert modifier.ignore == []
     assert modifier.weight_observer == "osfp4"
@@ -340,3 +341,37 @@ def test_resolved_groups_have_independent_optimizer_settings():
     assert first.weights.observer_kwargs is not second.weights.observer_kwargs
     first.weights.observer_kwargs["num_iters"] = 100
     assert second.weights.observer_kwargs["num_iters"] == 7
+
+
+def test_auto_activation_subsampling_serializes_without_resolving_to_one_cap():
+    modifier = _OSFP4Modifier(scheme="NVFP4")
+    assert modifier.model_dump(mode="json")["activation_subsample_size"] == "auto"
+
+
+def test_unknown_activation_subsampling_policy_is_rejected():
+    with pytest.raises(ValueError, match="activation_subsample_size"):
+        _OSFP4Modifier(scheme="NVFP4", activation_subsample_size="adaptive")
+
+
+@pytest.mark.parametrize("width", [16, 32])
+def test_auto_uses_shared_input_width_not_combined_output_rows(width):
+    modifier = _OSFP4Modifier(scheme="NVFP4")
+    mapping = OSFP4Mapping(
+        "shared", None, (torch.nn.Linear(width, 3), torch.nn.Linear(width, 5))
+    )
+    assert modifier._resolve_activation_subsample_size(mapping) == (width, width)
+
+
+def test_auto_rejects_mixed_widths_before_registering_capture_hooks(mocker):
+    model = LlamaForCausalLM()
+    modifier = make_osfp4_modifier()
+    state = State(model=model)
+    modifier.on_initialize(state)
+    modifier._resolved_mappings.append(
+        OSFP4Mapping("mixed", None, (torch.nn.Linear(16, 3), torch.nn.Linear(32, 5)))
+    )
+    capture = mocker.spy(modifier._calibration, "make_capture_hook")
+    with pytest.raises(ValueError, match="different input widths.*16.*32"):
+        modifier.on_calibration_start(state, Event())
+    capture.assert_not_called()
+    modifier.remove_hooks()

@@ -109,7 +109,21 @@ Notes:
 | `lr` | `0.12` | Adam learning rate. |
 | `dampening_frac` | `0.01` | Hessian damping for SIC. |
 | `offload_hessians` | `False` | Keep Hessians on the CPU between uses to save GPU memory. |
-| `activation_subsample_size` | `16384` | Cap on the activation rows used in the loss; `None` uses all rows. |
+| `activation_subsample_size` | `"auto"` | Use up to the mapping's input width in activation rows; an integer sets a fixed cap and `None` uses all rows. |
+
+When `activation_subsample_size` is omitted, it defaults to `"auto"`. Each
+mapping retains `k = min(total_activation_rows, n)` complete activation vectors,
+where `n = weight.shape[1]` is the shared input width of its balance layers.
+MLP down projections use their intermediate input width. Mappings whose balance
+layers have different input widths cannot use auto subsampling.
+
+An integer sets a fixed row cap; pass `16384` to retain the previous sampling
+policy. `None` uses all rows. `NVFP4A16` disables activation subsampling
+regardless of this option. Subsampling limits optimization inputs; Hessians and
+activation statistics still use all calibration rows.
+
+The FP-Quant calibration CLI accepts `--activation-subsample-size auto` or an
+integer and defaults to auto.
 
 The [modifier README](src/llmcompressor_osfp4/modifiers/README.md) explains the
 algorithm and failure behavior. The

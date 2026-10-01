@@ -172,3 +172,52 @@ def test_dataset_contract_matches_fpquant_recipe(tmp_path):
     assert manifest["calibration_config"] == "sample-10BT"
     assert manifest["shuffle_buffer_size"] == 1000
     assert manifest["tokenizer"] == "Qwen/Qwen3-8B"
+
+
+@pytest.mark.parametrize(
+    "value,expected", [("auto", "auto"), ("16384", 16384), ("128", 128)]
+)
+def test_activation_subsample_cli_parser(value, expected):
+    assert calibration._activation_subsample_size(value) == expected
+
+
+def test_activation_subsample_cli_rejects_unknown_policy():
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError, match="integer or 'auto'"):
+        calibration._activation_subsample_size("adaptive")
+
+
+@pytest.mark.parametrize(
+    "option,expected", [(None, "auto"), ("auto", "auto"), ("16384", 16384)]
+)
+def test_calibration_cli_passes_sampling_policy_to_recipe(
+    tmp_path, monkeypatch, option, expected
+):
+    import sys
+
+    args = ["calibrate.py", "--method", "osfp4-rtn", "--save-dir", str(tmp_path)]
+    if option is not None:
+        args.extend(["--activation-subsample-size", option])
+    monkeypatch.setattr(sys, "argv", args)
+    monkeypatch.setattr(
+        calibration.AutoModelForCausalLM, "from_pretrained", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        calibration.AutoTokenizer, "from_pretrained", lambda *a, **k: None
+    )
+    monkeypatch.setattr(calibration, "validate_prepared_dataset", lambda *a: [])
+
+    class RecipeReached(Exception):
+        pass
+
+    def inspect_recipe(parsed):
+        assert parsed.activation_subsample_size == expected
+        recipe, _ = build_recipe(parsed)
+        assert recipe[0].activation_subsample_size == expected
+        raise RecipeReached
+
+    build_recipe = calibration._build_recipe
+    monkeypatch.setattr(calibration, "_build_recipe", inspect_recipe)
+    with pytest.raises(RecipeReached):
+        calibration.calibrate_main(TABLE1)

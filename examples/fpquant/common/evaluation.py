@@ -489,8 +489,6 @@ def validate_local_model(
     activation_subsampling = recipe.get("activation_subsampling")
     if activation_subsample_size is not None:
         if not (
-            # Retain compatibility with checkpoints produced before the public
-            # "auto" policy was removed in favor of the fixed 65536 default.
             activation_subsample_size == "auto"
             or (
                 isinstance(activation_subsample_size, int)

@@ -143,3 +143,15 @@ def test_unknown_optimization_mode_is_rejected(tmp_path):
 def test_select_metric_rejects_invalid_score():
     with pytest.raises(ValueError):
         evaluation.select_metric({"acc,none": float("nan")}, ("acc,none",))
+
+
+def test_validate_local_model_accepts_auto_sampling_provenance(tmp_path):
+    checkpoint = tmp_path / "model"
+    _write_osfp4_checkpoint(checkpoint)
+    path = checkpoint / "calibration-manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["recipe"]["activation_subsample_size"] = "auto"
+    record = manifest["recipe"]["activation_subsampling"]["mapping"]
+    record.update(policy="auto", n=4)
+    path.write_text(json.dumps(manifest))
+    assert evaluation.validate_local_model(checkpoint, TABLE1, "osfp4-rtn") == []

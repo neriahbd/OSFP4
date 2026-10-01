@@ -53,7 +53,11 @@ def run_case(scheme: str, mode: str) -> tuple[dict, dict[str, torch.Tensor]]:
     ]
     loader = torch.utils.data.DataLoader(samples, batch_size=None)
     modifier = OSFP4Modifier(
-        scheme=scheme, optimization_mode=mode, ignore=["lm_head"], steps=2
+        scheme=scheme,
+        optimization_mode=mode,
+        ignore=["lm_head"],
+        steps=2,
+        activation_subsample_size=16384,
     )
     with ExitStack() as stack:
         stack.enter_context(
