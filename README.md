@@ -3,8 +3,14 @@
 OSFP4 is an optimized-scale NVFP4 quantization plugin for
 [LLM Compressor](https://github.com/vllm-project/llm-compressor). It adds
 `OSFP4Modifier`, which calibrates a model and learns better FP4 scales than
-plain round-to-nearest NVFP4. The result is a standard compressed-tensors
-checkpoint.
+plain round-to-nearest NVFP4.
+
+OSFP4 has two parts:
+
+1. **This package** quantizes a model and saves an OSFP4 checkpoint, which is
+   an NVFP4 compressed-tensors checkpoint plus per-layer smoothing scales.
+2. **[vllm-osfp4](https://github.com/neriahbd/vllm-osfp4)** is a vLLM plugin
+   that serves those checkpoints. See [Serving with vLLM](#serving-with-vllm).
 
 Supported schemes:
 
@@ -130,12 +136,26 @@ algorithm and failure behavior. The
 [optimization README](src/llmcompressor_osfp4/modifiers/optimization/README.md)
 explains the RTN and SIC math.
 
-## Serving
+## Serving with vLLM
 
-Checkpoints are saved with `quant_method="osfp4"`. Layers that need runtime
-activation smoothing store a BF16 `smooth_quant_scale`, and the checkpoint
-config lists them in `osfp4_metadata`. To serve these checkpoints in vLLM, use
-the matching `vllm-osfp4` plugin.
+Stock vLLM cannot load OSFP4 checkpoints. Serve them with the
+[vllm-osfp4](https://github.com/neriahbd/vllm-osfp4) plugin, which needs
+vLLM 0.24–0.28 and a CUDA GPU with NVFP4 support.
+
+Some layers, such as `o_proj` and `down_proj`, have no preceding layer to
+absorb their smoothing scale. OSFP4 stores that scale in the checkpoint as
+`smooth_quant_scale`, and the plugin multiplies it into the layer's input before
+running vLLM's stock NVFP4 kernels.
+
+Install the plugin in the vLLM environment, then serve:
+
+```bash
+pip install "git+https://github.com/neriahbd/vllm-osfp4.git"
+VLLM_PLUGINS=osfp4 vllm serve ./Qwen3-0.6B-OSFP4
+```
+
+vLLM detects the `osfp4` quantization method from the checkpoint
+automatically.
 
 ## Repository contents
 
