@@ -1,7 +1,13 @@
 # OSFP4
 
+[![Paper](https://img.shields.io/badge/arXiv-2610.08231-b31b1b.svg)](https://arxiv.org/abs/2610.08231)
+
+
 OSFP4 provides an NVFP4 quantization modifier for
 [LLM Compressor](https://github.com/vllm-project/llm-compressor).
+
+Paper: [*WOSFP4: Joint Optimization of Diagonal Smoothing and Block Scales for NVFP4 Quantization*](https://arxiv.org/abs/2610.08231)
+
 
 ## Install
 
