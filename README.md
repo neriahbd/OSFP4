@@ -6,7 +6,7 @@
 OSFP4 provides an NVFP4 quantization modifier for
 [LLM Compressor](https://github.com/vllm-project/llm-compressor).
 
-Paper: [*WOSFP4: Joint Optimization of Diagonal Smoothing and Block Scales for NVFP4 Quantization*](https://arxiv.org/abs/2610.08231)
+Paper: [*WSFP4: Joint Optimization of Diagonal Smoothing and Block Scales for NVFP4 Quantization*](https://arxiv.org/abs/2610.08231)
 
 
 ## Install
