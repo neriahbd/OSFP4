@@ -10,21 +10,27 @@ from compressed_tensors.quantization import (
     DynamicType,
     QuantizationConfig,
     QuantizationStrategy,
+    preset_name_to_scheme,
 )
+from compressed_tensors.registry import standardize_lookup_name
 from compressed_tensors.utils import (
     match_modules_set,
     match_named_modules,
     update_offload_parameter,
 )
 from loguru import logger
-from pydantic import PrivateAttr
+from pydantic import Field, PrivateAttr, field_validator
 from torch.nn import Linear, Module
 from torch.utils._pytree import tree_leaves
 from torch.utils.data import IterableDataset
 from torch.utils.hooks import RemovableHandle
 from tqdm import tqdm
 
-from llmcompressor.core import Event, State
+from llmcompressor.core import Event, State, active_session
+from llmcompressor.modeling.moe.linearize import (
+    get_linearized_moes,
+    get_non_linearized_moes,
+)
 from llmcompressor.modifiers import Modifier
 from llmcompressor.modifiers.quantization.calibration import update_qparams
 from llmcompressor.modifiers.quantization.quantization import QuantizationMixin
@@ -67,11 +73,11 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
     # Configuration
 
     # Calibration is always required, so pipeline inference selects sequential.
-    requires_calibration_data: bool = True
+    requires_calibration_data: Literal[True] = True
     optimization_mode: Literal["rtn", "sic"] = "sic"
-    steps: int = 80
-    lr: float = 0.12
-    dampening_frac: float = 0.01
+    steps: int = Field(default=80, ge=0)
+    lr: float = Field(default=0.12, gt=0, allow_inf_nan=False)
+    dampening_frac: float = Field(default=0.01, ge=0, lt=1, allow_inf_nan=False)
     offload_hessians: bool = False
     activation_subsample_size: int | Literal["auto"] | None = "auto"
 
@@ -91,23 +97,88 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         default_factory=dict
     )
 
+    @field_validator("activation_subsample_size")
+    @classmethod
+    def _validate_activation_subsample_size(cls, value):
+        """Reject nonpositive integer activation sample sizes."""
+        if isinstance(value, int) and value <= 0:
+            raise ValueError("activation_subsample_size must be positive")
+        return value
+
     # 1. Initialization: resolve mappings, reset state, and initialize quantization.
 
     def on_initialize(self, state: State, **kwargs) -> bool:
         self._require_usable()
-        self._resolved_mappings = self._resolve_mappings(state.model)
+        self._validate_initialization(state, **kwargs)
+        mappings = self._resolve_mappings(state.model)
+        QuantizationMixin.initialize_quantization(self, state.model)
         self._reset_calibration_state()
+        self._resolved_mappings = mappings
         # State may contain a deep copy; count the loader the pipeline will consume.
         self._calibration_dataloader = kwargs.get("calib_data", state.data.calib)
         self._calibration.offload_hessians = self.offload_hessians
-        QuantizationMixin.initialize_quantization(self, state.model)
         return True
+
+    def _validate_initialization(self, state: State, **kwargs) -> None:
+        """Reject unsupported execution, recipe, and model configurations before
+        modifying the model.
+        """
+        if self.start not in (None, -1, 0) or self.end not in (None, -1, 0):
+            raise ValueError("OSFP4 requires a one-shot schedule")
+        if is_distributed():
+            raise NotImplementedError("OSFP4 calibration is single-process")
+        pipeline = kwargs.get("pipeline")
+        if pipeline is not None and standardize_lookup_name(pipeline) not in (
+            "sequential",
+            "independent",
+        ):
+            raise ValueError("OSFP4 requires the sequential calibration pipeline")
+        if getattr(state, "layerwise_decompression", False) or getattr(
+            state, "layerwise_compression", False
+        ):
+            raise ValueError(
+                "OSFP4 does not support layerwise compression or decompression; "
+                "calibrate from an uncompressed model"
+            )
+        recipe = active_session().lifecycle.recipe
+        if recipe is not None and any(
+            modifier is self for modifier in recipe.modifiers
+        ):
+            if len(recipe.modifiers) != 1:
+                raise ValueError("OSFP4 must be the only modifier in its recipe")
+        config = getattr(state.model, "config", None)
+        if config is not None and hasattr(config, "get_text_config"):
+            config = config.get_text_config()
+        has_moe_config = any(
+            getattr(config, name, 0) or 0
+            for name in (
+                "num_experts",
+                "num_local_experts",
+                "moe_num_experts",
+                "n_routed_experts",
+            )
+        )
+        if (
+            get_linearized_moes(state.model)
+            or get_non_linearized_moes(state.model)
+            or has_moe_config
+        ):
+            raise ValueError("OSFP4 supports dense models only")
 
     def _resolve_mappings(self, model: Module) -> list[OSFP4Mapping]:
         """Resolve smooth-layer mappings, then runtime mappings, in order."""
         selected = list(
             match_named_modules(model, self.resolved_weight_targets, self.ignore)
         )
+        if not selected and self.resolved_weight_targets:
+            raise ValueError("No Linear modules matched the OSFP4 targets")
+        if any(
+            not isinstance(layer, Linear) or layer.in_features % 16
+            for _, layer in selected
+        ):
+            raise ValueError(
+                "OSFP4 requires Linear layers with input widths divisible by 16"
+            )
         selected_balance_layers = {layer for _, layer in selected}
         module_names = get_module_to_name_dict(model)
         mappings = self._resolve_smooth_layer_mappings(
@@ -148,10 +219,33 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
             "num_iters": self.steps,
             "lr": self.lr,
         }
+
+        def matches_quantization_args(actual, reference):
+            """Compare quantization arguments while ignoring observer names and options."""
+            if actual is None or reference is None:
+                return actual is reference
+
+            excluded = {"observer", "observer_kwargs"}
+            return actual.model_dump(exclude=excluded) == reference.model_dump(
+                exclude=excluded
+            )
+
         weight_only_groups = set()
         for scheme in config.config_groups.values():
-            inputs = scheme.input_activations
-            weight_only_groups.add(inputs is None)
+            input_activations = scheme.input_activations
+            expected_scheme = preset_name_to_scheme(
+                "NVFP4A16" if input_activations is None else "NVFP4", []
+            )
+
+            if (
+                not matches_quantization_args(scheme.weights, expected_scheme.weights)
+                or not matches_quantization_args(
+                    input_activations, expected_scheme.input_activations
+                )
+                or scheme.output_activations is not None
+            ):
+                raise ValueError("OSFP4 supports only NVFP4 and NVFP4A16 schemes")
+            weight_only_groups.add(input_activations is None)
             scheme.weights.observer = _OSFP4_OBSERVER
             scheme.weights.observer_kwargs = observer_kwargs.copy()
         if len(weight_only_groups) > 1:
@@ -257,6 +351,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
                 generator.set_state(rng)
 
     def on_calibration_start(self, state: State, event: Event, **kwargs):
+        self._require_usable()
         if is_distributed():
             raise NotImplementedError(
                 "OSFP4 calibration is single-process; use tensor parallelism only "
@@ -335,6 +430,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
             self._optimize_mapping(mapping)
 
     def _optimize_mapping(self, mapping: OSFP4Mapping) -> None:
+        self._require_usable()
         optimization_input_batches = self._sample_optimization_inputs(mapping)
         self._deploy_mapping(mapping, optimization_input_batches)
         self._optimized_mapping_names.add(mapping.mapping_name)

@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+from transformers import LlamaConfig
 
 import torch
 
@@ -50,7 +50,7 @@ class TinyDecoder(torch.nn.Module):
 class LlamaForCausalLM(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = SimpleNamespace(
+        self.config = LlamaConfig(
             architectures=["LlamaForCausalLM"],
             model_type="llama",
             num_hidden_layers=1,

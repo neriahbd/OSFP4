@@ -11,7 +11,12 @@ from torch.nn import Module
 from llmcompressor.modifiers.quantization.calibration import update_qparams
 
 from .calibration_cache import OSFP4CalibrationCache
-from .optimization import optimize_rtn, optimize_sic
+from .optimization import (
+    RTNQuantizationResult,
+    SICQuantizationResult,
+    optimize_rtn,
+    optimize_sic,
+)
 from .smoothing import deploy_mapping_smooth_quant_scale
 
 if TYPE_CHECKING:
@@ -42,7 +47,7 @@ def _update_smoothed_input_global_scale(
     update_qparams(layers, "input")
 
 
-def quantize_mapping(
+def _optimize_mapping(
     mapping: OSFP4Mapping,
     cache: OSFP4CalibrationCache,
     *,
@@ -50,9 +55,8 @@ def quantize_mapping(
     dampening_frac: float,
     weight_only: bool,
     optimization_input_batches: tuple[torch.Tensor, ...] | None = None,
-    _deployment_stage: Callable[[str], None] | None = None,
-) -> list[tuple[Module, dict[str, torch.Tensor]]]:
-    """Normalize cached statistics, optimize one mapping, and return deployment."""
+) -> RTNQuantizationResult | SICQuantizationResult:
+    """Compute mapping scales and SIC weights before any deployment writes."""
     layers = mapping.balance_layers
     weight_dtype = layers[0].weight.dtype
     device = layers[0].weight.device
@@ -83,7 +87,6 @@ def quantize_mapping(
             weight_dtype=weight_dtype,
             percdamp=dampening_frac,
         )
-        quantized_weight = result.quantized_weight
     else:
         sigma_x_squared = (
             cache.sigma_x_squared[mapping.mapping_name].to(weight.device) / sample_count
@@ -95,8 +98,31 @@ def quantize_mapping(
             alpha_dtype=alpha_dtype,
             sigma_x_squared=sigma_x_squared,
         )
-        quantized_weight = None
 
+    return result
+
+
+def quantize_mapping(
+    mapping: OSFP4Mapping,
+    cache: OSFP4CalibrationCache,
+    *,
+    mode: Literal["rtn", "sic"],
+    dampening_frac: float,
+    weight_only: bool,
+    optimization_input_batches: tuple[torch.Tensor, ...] | None = None,
+    _deployment_stage: Callable[[str], None] | None = None,
+) -> list[tuple[Module, dict[str, torch.Tensor]]]:
+    """Normalize cached statistics, optimize one mapping, and return deployment."""
+    layers = mapping.balance_layers
+    result = _optimize_mapping(
+        mapping,
+        cache,
+        mode=mode,
+        dampening_frac=dampening_frac,
+        weight_only=weight_only,
+        optimization_input_batches=optimization_input_batches,
+    )
+    quantized_weight = result.quantized_weight if mode == "sic" else None
     if _deployment_stage is not None:
         _deployment_stage("smoothing")
     scale = deploy_mapping_smooth_quant_scale(mapping, result.alpha_star)
@@ -104,6 +130,7 @@ def quantize_mapping(
     if not weight_only:
         if _deployment_stage is not None:
             _deployment_stage("input-scale replay")
+        cache.wait(mapping.mapping_name, torch.device("cpu"))
         replay_inputs = cache.inputs[mapping.mapping_name]
         if mapping.mapping_name in cache.input_absmax:
             # max(abs(s * x)) = max(abs(s) * max_tokens(abs(x))). Replay

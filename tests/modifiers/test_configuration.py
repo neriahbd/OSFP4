@@ -290,18 +290,18 @@ def test_modifier_configures_osfp4_local_hessian_offload():
     assert modifier._calibration.offload_hessians is True
 
 
-def test_optimizer_configuration_has_no_range_validation():
-    modifier = make_osfp4_modifier(
-        steps=-1,
-        lr=0.0,
-        dampening_frac=-0.01,
-        activation_subsample_size=0,
-    )
-
-    assert modifier.steps == -1
-    assert modifier.lr == 0.0
-    assert modifier.dampening_frac == -0.01
-    assert modifier.activation_subsample_size == 0
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("steps", -1),
+        ("lr", 0.0),
+        ("dampening_frac", -0.01),
+        ("activation_subsample_size", 0),
+    ],
+)
+def test_invalid_optimizer_configuration(field, value):
+    with pytest.raises(ValueError, match=field):
+        make_osfp4_modifier(**{field: value})
 
 
 @pytest.mark.parametrize("mode", ["var", "opt", "absmax"])

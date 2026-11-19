@@ -73,6 +73,13 @@ A CUDA GPU is recommended for real models. CPU works for small models and tests.
 | `NVFP4` | FP4 | FP4 |
 | `NVFP4A16` | FP4 | 16-bit |
 
+Large mappings optimize scale parameters in chunks of quantization groups. The
+optimizer chooses the chunk size from the tensor shape and accumulates the
+broadcast alpha gradient in FP64 for shapes eligible for splitting. Both RTN
+and SIC use this path. The saved runtime alpha remains a BF16
+`smooth_quant_scale` for the OSFP4 vLLM plugin. See the
+[byte-parity check](tests/parity/README.md) to reproduce the comparison.
+
 Scale optimization modes:
 
 - **`sic`** (default): Hessian-aware. Quantizes block by block and propagates

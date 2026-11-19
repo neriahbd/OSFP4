@@ -5,6 +5,7 @@ from loguru import logger
 
 from llmcompressor.observers.base import Observer
 from .loss import (
+    JointLossCoefficients,
     build_joint_loss_coefficients,
     build_weight_loss_coefficients,
     compute_joint_loss,
@@ -16,7 +17,10 @@ from .scale_optimization import (
     create_log_scale_parameters,
     initialize_scale_values_from_absmax,
     materialize_scale_values,
-    run_optimizer,
+    LogScaleParameters,
+    run_chunked_optimizer,
+    select_blocks_per_chunk,
+    uses_exact_alpha_reduction,
 )
 from .scale_selection import (
     _search_e4m3_gamma_star,
@@ -33,80 +37,109 @@ class OptimizedQuantizationGroupScales(NamedTuple):
 
 
 def _optimize_joint_scales(
-    weight: torch.Tensor,
-    activations: torch.Tensor,
+    W_blocks: torch.Tensor,
+    X_blocks: torch.Tensor,
     *,
     weight_metric: torch.Tensor,
     steps: int,
     lr: float,
 ) -> QuantizationGroupScaleValues:
-    """Learn joint weight and activation scales from an explicit weight metric."""
-    weight = weight.detach().to(dtype=torch.float32)
-    activations = activations.detach().to(
-        device=weight.device,
+    """Learn alpha, gamma_w, and gamma_x from W_blocks, X_blocks, and weight_metric."""
+    W_blocks = W_blocks.detach().to(dtype=torch.float32)
+    X_blocks = X_blocks.detach().to(
+        device=W_blocks.device,
         dtype=torch.float32,
     )
     weight_metric = weight_metric.detach().to(
-        device=weight.device,
+        device=W_blocks.device,
         dtype=torch.float32,
     )
-    initial = initialize_scale_values_from_absmax(weight, activations)
-    coefficients = build_joint_loss_coefficients(
-        weight,
-        activations,
-        weight_metric=weight_metric,
-        activation_reference=weight,
+    L, m, _ = W_blocks.shape
+    blocks_per_chunk = select_blocks_per_chunk(m, X_blocks.shape[2], L)
+    exact_alpha_reduction = uses_exact_alpha_reduction(m, X_blocks.shape[2], L)
+    initial_scales = initialize_scale_values_from_absmax(
+        W_blocks, X_blocks, blocks_per_chunk=blocks_per_chunk
     )
-    parameters = create_log_scale_parameters(initial)
+    coefficients = build_joint_loss_coefficients(
+        W_blocks,
+        X_blocks,
+        weight_metric=weight_metric,
+    )
+    log_scales = create_log_scale_parameters(initial_scales)
+    del initial_scales
 
-    def loss() -> torch.Tensor:
-        """Evaluate the summed joint weight and activation loss."""
+    def chunk_loss(blocks: slice, chunk_log_scales: LogScaleParameters) -> torch.Tensor:
+        """Evaluate the summed joint weight and activation loss of selected blocks."""
         return compute_joint_loss(
-            weight,
-            activations,
-            parameters.log_alpha.exp(),
-            parameters.log_gamma_w.exp(),
-            parameters.log_gamma_x.exp(),  # type: ignore[union-attr]
-            coefficients,
+            W_blocks[blocks],
+            X_blocks[blocks],
+            chunk_log_scales.log_alpha.exp(),
+            chunk_log_scales.log_gamma_w.exp(),
+            chunk_log_scales.log_gamma_x.exp(),  # type: ignore[union-attr]
+            JointLossCoefficients(
+                coefficients.coeff_w[blocks], coefficients.coeff_x[blocks]
+            ),
+            exact_alpha_reduction=exact_alpha_reduction,
         ).sum()
 
-    run_optimizer(parameters, loss, steps=steps, lr=lr)
-    canonicalize_log_scale_parameters(parameters)
-    return materialize_scale_values(parameters)
+    run_chunked_optimizer(
+        log_scales,
+        chunk_loss,
+        steps=steps,
+        lr=lr,
+        num_blocks=L,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+    canonicalize_log_scale_parameters(log_scales)
+    return materialize_scale_values(log_scales)
 
 
 def _optimize_weight_scales(
-    weight_target: torch.Tensor,
+    W_blocks: torch.Tensor,
     weight_metric: torch.Tensor,
     *,
     steps: int,
     lr: float,
 ) -> QuantizationGroupScaleValues:
-    """Learn A16 alpha and weight gamma from normalized activation statistics."""
-    weight_target = weight_target.detach().to(dtype=torch.float32)
+    """Learn A16 alpha and gamma_w from W_blocks and weight_metric."""
+    W_blocks = W_blocks.detach().to(dtype=torch.float32)
     weight_metric = weight_metric.detach().to(
-        device=weight_target.device,
+        device=W_blocks.device,
         dtype=torch.float32,
     )
-    initial = initialize_scale_values_from_absmax(weight_target, None)
+    L, m, _ = W_blocks.shape
+    blocks_per_chunk = select_blocks_per_chunk(m, 0, L)
+    exact_alpha_reduction = uses_exact_alpha_reduction(m, 0, L)
+    initial_scales = initialize_scale_values_from_absmax(
+        W_blocks, None, blocks_per_chunk=blocks_per_chunk
+    )
     coefficients = build_weight_loss_coefficients(
-        weight_target,
+        W_blocks,
         weight_metric=weight_metric,
     )
-    parameters = create_log_scale_parameters(initial)
+    log_scales = create_log_scale_parameters(initial_scales)
+    del initial_scales
 
-    def loss() -> torch.Tensor:
-        """Evaluate the summed weight-only loss."""
+    def chunk_loss(blocks: slice, chunk_log_scales: LogScaleParameters) -> torch.Tensor:
+        """Evaluate the summed weight-only loss of selected blocks."""
         return compute_weight_loss(
-            weight_target,
-            parameters.log_alpha.exp(),
-            parameters.log_gamma_w.exp(),
-            coefficients,
+            W_blocks[blocks],
+            chunk_log_scales.log_alpha.exp(),
+            chunk_log_scales.log_gamma_w.exp(),
+            coefficients[blocks],
+            exact_alpha_reduction=exact_alpha_reduction,
         ).sum()
 
-    run_optimizer(parameters, loss, steps=steps, lr=lr)
-    canonicalize_log_scale_parameters(parameters)
-    return materialize_scale_values(parameters)
+    run_chunked_optimizer(
+        log_scales,
+        chunk_loss,
+        steps=steps,
+        lr=lr,
+        num_blocks=L,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+    canonicalize_log_scale_parameters(log_scales)
+    return materialize_scale_values(log_scales)
 
 
 # Observer

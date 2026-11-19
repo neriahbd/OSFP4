@@ -212,5 +212,5 @@ def test_activation_transfer_only_uses_nonblocking_for_pinned_cuda(
     )
     batch = torch.arange(32).reshape(2, 16)
     result = assemble_activation_quantization_groups([batch], 1, torch.device(device))
-    assert calls == [(torch.device(device), torch.float32, pinned and device == "cuda")]
+    assert calls == [(torch.device(device), batch.dtype, pinned and device == "cuda")]
     assert_bytes(result, batch.float().reshape(2, 1, 16).permute(1, 2, 0).contiguous())

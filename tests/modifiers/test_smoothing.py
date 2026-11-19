@@ -257,3 +257,14 @@ def test_deploy_mapping_smooth_quant_scale_dispatches_smooth_layer_mapping():
 
     assert torch.equal(deployed_smooth_quant_scale, smooth_quant_scale)
     assert "smooth_quant_scale" not in layer._parameters
+
+
+def test_fold_rectangular_linear_scales_output_rows():
+    smooth = torch.nn.Linear(7, 16)
+    balance = torch.nn.Linear(16, 9)
+    mapping = OSFP4Mapping("projection", smooth, (balance,))
+    weight, bias = smooth.weight.detach().clone(), smooth.bias.detach().clone()
+    alpha = torch.linspace(0.5, 2.0, 16)
+    deploy_mapping_smooth_quant_scale(mapping, alpha)
+    assert _tensor_bytes(smooth.weight) == _tensor_bytes(weight * alpha[:, None])
+    assert _tensor_bytes(smooth.bias) == _tensor_bytes(bias * alpha)

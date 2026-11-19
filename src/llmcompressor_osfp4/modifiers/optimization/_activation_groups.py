@@ -32,7 +32,7 @@ def assemble_activation_quantization_groups(
             activations.detach()
             .to(
                 device=device,
-                dtype=torch.float32,
+                dtype=activations.dtype,
                 non_blocking=(
                     activations.device.type == "cpu"
                     and device.type == "cuda"
@@ -45,6 +45,6 @@ def assemble_activation_quantization_groups(
         end = start + converted.shape[-1]
         groups[:, :, start:end].copy_(converted)
         start = end
-        # Release this transfer before allocating the next batch's FP32 buffer.
+        # Release this transfer before allocating the next batch's transfer buffer.
         del converted
     return groups

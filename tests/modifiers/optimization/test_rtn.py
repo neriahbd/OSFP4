@@ -80,7 +80,9 @@ def _legacy_optimize_joint_scales(weight, activations, *, steps, lr):
             coefficients,
         ).sum()
 
-    osfp4_observer.run_optimizer(
+    from llmcompressor_osfp4.observers.scale_optimization import run_optimizer
+
+    run_optimizer(
         parameters,
         evaluate_loss,
         steps=steps,
