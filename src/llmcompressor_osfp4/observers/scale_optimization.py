@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 import torch
-from .fp4 import FP4_ABSMAX
+from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA
 
 __all__ = [
     "QuantizationGroupScaleValues",
@@ -53,8 +53,8 @@ class LogScaleParameters(NamedTuple):
 
 
 def initialize_scale_values_from_absmax(
-    target: torch.Tensor,
-    activations: torch.Tensor | None,
+    W_blocks: torch.Tensor,
+    X_blocks: torch.Tensor | None,
     *,
     blocks_per_chunk: int | None = None,
 ) -> QuantizationGroupScaleValues:
@@ -85,23 +85,23 @@ def initialize_scale_values_from_absmax(
             values.abs().amax(dim=reduction_dim, keepdim=True),
             min=eps,
         )
-        return maxima / FP4_ABSMAX
+        return maxima / FP4_E2M1_DATA.max
 
-    L, _, block_width = target.shape
+    L, _, block_width = W_blocks.shape
     alpha = torch.ones(
         L,
         block_width,
-        device=target.device,
-        dtype=target.dtype,
+        device=W_blocks.device,
+        dtype=W_blocks.dtype,
     )
-    target_absmax = FP4_ABSMAX * _FP8_MAX / _FP8_SAFETY_FACTOR
+    target_absmax = FP4_E2M1_DATA.max * _FP8_MAX / _FP8_SAFETY_FACTOR
     # Every statistic is per block, so chunking over blocks bounds the normalized
     # temporaries without changing any value.
     gamma_w_chunks, gamma_x_chunks = [], []
     for chunk in _block_chunks(L, L if blocks_per_chunk is None else blocks_per_chunk):
         num_chunk_blocks = chunk.stop - chunk.start
         W_blocks_normalized, weight_divisor = normalize(
-            target[chunk],
+            W_blocks[chunk],
             target_absmax,
         )
         gamma_w_chunks.append(
@@ -112,9 +112,9 @@ def initialize_scale_values_from_absmax(
             )
         )
         del W_blocks_normalized
-        if activations is not None:
+        if X_blocks is not None:
             X_blocks_normalized, activation_divisor = normalize(
-                activations[chunk],
+                X_blocks[chunk],
                 target_absmax,
             )
             gamma_x_chunks.append(
@@ -128,7 +128,7 @@ def initialize_scale_values_from_absmax(
     return QuantizationGroupScaleValues(
         alpha=alpha,
         gamma_w=_concat_block_chunks(gamma_w_chunks),
-        gamma_x=None if activations is None else _concat_block_chunks(gamma_x_chunks),
+        gamma_x=None if X_blocks is None else _concat_block_chunks(gamma_x_chunks),
     )
 
 
@@ -154,7 +154,7 @@ def create_log_scale_parameters(
 
 
 def run_optimizer(
-    parameters: LogScaleParameters,
+    log_scales: LogScaleParameters,
     loss_evaluator: Callable[[], torch.Tensor],
     *,
     steps: int,
@@ -162,7 +162,7 @@ def run_optimizer(
 ) -> None:
     """Optimize log scales."""
     optimizer = torch.optim.Adam(
-        [parameter for parameter in parameters if parameter is not None],
+        [parameter for parameter in log_scales if parameter is not None],
         lr=lr,
     )
     with torch.enable_grad():
@@ -190,7 +190,7 @@ def select_blocks_per_chunk(m: int, k: int, num_blocks: int) -> int:
     """Return the number of quantization groups per chunk for loss evaluation.
 
     One chunk's autograd graph holds about ``_GRAPH_COPIES`` FP32 copies of its
-    ``target [c, m, 16]`` and ``activations [c, 16, k]`` slices (``k = 0`` for
+    ``W_blocks [c, m, 16]`` and ``X_blocks [c, 16, k]`` slices (``k = 0`` for
     weight-only). Chunking by ``num_blocks // _GRAPH_COPIES`` keeps that workspace
     near one full copy, so scale optimization holds about three copies in total:
     the blocks, their loss coefficients, and the workspace. Problems whose whole
@@ -280,29 +280,29 @@ def run_chunked_optimizer(
 # Canonicalization
 
 
-def canonicalize_log_scale_parameters(parameters: LogScaleParameters) -> None:
-    """Center log weight gamma and fold its mean into alpha in place."""
+def canonicalize_log_scale_parameters(log_scales: LogScaleParameters) -> None:
+    """Center log_gamma_w and fold its mean into log_alpha in place."""
     with torch.no_grad():
-        shift = parameters.log_gamma_w.mean(dim=(1, 2), keepdim=True)
-        parameters.log_alpha.add_(shift.squeeze(-1))
-        parameters.log_gamma_w.sub_(shift)
-        if parameters.log_gamma_x is not None:
-            parameters.log_gamma_x.add_(shift)
+        mean_log_gamma_w = log_scales.log_gamma_w.mean(dim=(1, 2), keepdim=True)
+        log_scales.log_alpha.add_(mean_log_gamma_w.squeeze(-1))
+        log_scales.log_gamma_w.sub_(mean_log_gamma_w)
+        if log_scales.log_gamma_x is not None:
+            log_scales.log_gamma_x.add_(mean_log_gamma_w)
 
 
 # Materialization
 
 
 def materialize_scale_values(
-    parameters: LogScaleParameters,
+    log_scales: LogScaleParameters,
 ) -> QuantizationGroupScaleValues:
     """Return detached positive scales without mutating the optimized parameters."""
     return QuantizationGroupScaleValues(
-        alpha=parameters.log_alpha.detach().exp(),
-        gamma_w=parameters.log_gamma_w.detach().exp(),
+        alpha=log_scales.log_alpha.detach().exp(),
+        gamma_w=log_scales.log_gamma_w.detach().exp(),
         gamma_x=(
             None
-            if parameters.log_gamma_x is None
-            else parameters.log_gamma_x.detach().exp()
+            if log_scales.log_gamma_x is None
+            else log_scales.log_gamma_x.detach().exp()
         ),
     )

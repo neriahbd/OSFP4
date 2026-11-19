@@ -61,7 +61,7 @@ def test_joint_coefficients_loss_and_gradients_match_pre_refactor(dtype, noncont
     metric = (torch.rand(2, 16, generator=generator) + 0.1).to(dtype)
     snapshots = [value.clone() for value in (weight, activations, metric)]
     coefficients = loss.build_joint_loss_coefficients(
-        weight, activations, weight_metric=metric, activation_reference=weight
+        weight, activations, weight_metric=metric
     )
     coeff_w = weight.square()
     coeff_w.mul_(metric.view(2, 1, 16))

@@ -75,7 +75,7 @@ def test_repeated_finalize_is_a_byte_exact_noop(
     save = model.save_pretrained
     assert not modifier._resolved_mappings
     assert not modifier._runtime_smoothing_hooks
-    assert not modifier._calibration.sample_count
+    assert not modifier._calibration.token_count
 
     def unexpected(*args, **kwargs):
         raise AssertionError("Repeated finalization performed work")

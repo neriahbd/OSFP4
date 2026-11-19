@@ -7,7 +7,7 @@ from compressed_tensors.compressors.nvfp4.helpers import (
 from compressed_tensors.quantization import fake_quantize, preset_name_to_scheme
 from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA
 
-from llmcompressor_osfp4.observers.fp4 import (
+from tests.observers._fp4_reference import (
     quantize_e2m1,
 )
 from llmcompressor_osfp4.observers.scale_selection import (  # noqa: E501

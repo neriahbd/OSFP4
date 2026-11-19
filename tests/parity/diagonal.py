@@ -13,7 +13,8 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import load_file, save_file
 
-REFERENCE = "6a650621ac86842a3d8c08bb76b9350ebb5112d5"
+from check_source import REFERENCE, check as check_source
+
 CASES = [(s, m) for s in ("NVFP4", "NVFP4A16") for m in ("rtn", "sic")]
 
 
@@ -34,6 +35,7 @@ def check_reference(module, revision):
     subprocess.run(
         ["git", "-C", str(root), "diff", "--exit-code", "HEAD", "--", "src"], check=True
     )
+    return root
 
 
 def chunked_fixture(obs, device, folder, forced_chunk=None, projection=None):
@@ -102,7 +104,7 @@ def capture(args):
         else "llmcompressor_osfp4.observers.observer"
     )
     if reference:
-        check_reference(mod, REFERENCE)
+        check_source(check_reference(mod, REFERENCE))
         check_reference(
             importlib.import_module("compressed_tensors"),
             "30d017eec16e3d365be66017cbc1a57782ff7bcb",
@@ -161,22 +163,20 @@ def capture(args):
             nonlocal mapping_name
             mapping_name = mapping.mapping_name
             cache = instance._calibration_cache if reference else instance._calibration
-            (cache.wait_for_capture if reference else cache.wait)(
-                mapping_name, torch.device("cpu")
-            )
+            cache.wait_for_capture(mapping_name, torch.device("cpu"))
             for name, attr in [
                 (
                     "sampled_indices",
-                    "sampled_indices" if reference else "sample_indices",
+                    "sampled_indices",
                 ),
                 ("hessian", "hessian"),
                 (
                     "second_moment",
-                    "sigma_x_squared_sum" if reference else "sigma_x_squared",
+                    "sigma_x_squared_sum",
                 ),
                 (
                     "input_absmax",
-                    "input_channel_absmax" if reference else "input_absmax",
+                    "input_channel_absmax",
                 ),
             ]:
                 value = getattr(cache, attr).get(mapping_name)
@@ -215,12 +215,10 @@ def capture(args):
 
             def capture_result(*inputs, **kwargs):
                 result = original_opt(*inputs, **kwargs)
-                record(
-                    "rounded_alpha", result.alpha if reference else result.alpha_star
-                )
+                record("rounded_alpha", result.alpha)
                 record(
                     "selected_gamma",
-                    result.gamma_w_final if reference else result.gamma_w_star,
+                    result.gamma_w_final,
                 )
                 record("zero_points", result.weight_zero_point)
                 if mode == "sic":

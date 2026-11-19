@@ -12,6 +12,7 @@ with forced tiling. Use compare_base.py for the 48-case Llama/checkpoint matrix.
 """
 
 import argparse
+import inspect
 import json
 import os
 import runpy
@@ -171,9 +172,15 @@ def record_optimization(trace, dtype, noncontiguous, joint, steps):
         stack.enter_context(
             patch.object(observer, "canonicalize_log_scale_parameters", canonicalize)
         )
+        parameters = inspect.signature(
+            obs.optimize_quantization_group_scales
+        ).parameters
+        activation_arg = (
+            "X_blocks" if "X_blocks" in parameters else "activation_quantization_groups"
+        )
         optimized = obs.optimize_quantization_group_scales(
             weight,
-            activation_quantization_groups=activations,
+            **{activation_arg: activations},
             weight_metric=metric,
             alpha_dtype=dtype,
         )
@@ -248,8 +255,8 @@ def main():
         return
     for label in ("reference", "candidate"):
         source = getattr(args, label)
-        if source is None or not (source / "llmcompressor").is_dir():
-            parser.error(f"--{label} must contain llmcompressor")
+        if source is None or not (source / "llmcompressor_osfp4").is_dir():
+            parser.error(f"--{label} must contain llmcompressor_osfp4")
     args.output.mkdir(parents=True, exist_ok=False)
     for label in ("reference", "candidate"):
         source = getattr(args, label).resolve()

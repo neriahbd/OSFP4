@@ -66,7 +66,6 @@ def _legacy_optimize_joint_scales(weight, activations, *, steps, lr):
         weight,
         activations,
         weight_metric=sigma_x_squared,
-        activation_reference=weight,
     )
     parameters = osfp4_observer.create_log_scale_parameters(initialized)
 
@@ -115,7 +114,7 @@ def test_rtn_runner_separates_continuous_optimization_and_selection():
             self,
             weight,
             *,
-            activation_quantization_groups,
+            X_blocks,
             weight_metric,
             alpha_dtype,
         ):
@@ -124,8 +123,8 @@ def test_rtn_runner_separates_continuous_optimization_and_selection():
                 {
                     "event": "optimize",
                     "weight": weight.clone(),
-                    "activation_quantization_groups": (
-                        activation_quantization_groups.clone()
+                    "X_blocks": (
+                        X_blocks.clone()
                     ),
                     "weight_metric": weight_metric.clone(),
                 }
@@ -155,15 +154,15 @@ def test_rtn_runner_separates_continuous_optimization_and_selection():
     assert [call["event"] for call in calls] == ["optimize", "select"]
     assert torch.equal(calls[0]["weight"], W.unsqueeze(0))
     assert torch.equal(
-        calls[0]["activation_quantization_groups"], activations.T.unsqueeze(0)
+        calls[0]["X_blocks"], activations.T.unsqueeze(0)
     )
     assert torch.equal(
         calls[0]["weight_metric"],
         activations.T.unsqueeze(0).square().mean(dim=2),
     )
     assert torch.equal(calls[1]["weight"], W.unsqueeze(0))
-    assert torch.equal(result.alpha_star, torch.ones(16))
-    assert torch.equal(result.gamma_w_star, torch.full((2, 1), 2.0))
+    assert torch.equal(result.alpha, torch.ones(16))
+    assert torch.equal(result.gamma_w_final, torch.full((2, 1), 2.0))
     assert torch.equal(result.weight_zero_point, torch.zeros((2, 1)))
 
 
@@ -174,24 +173,24 @@ def test_rtn_optimizes_all_groups_once_and_preserves_result_layout():
     class RecordingObserver:
         mode = "rtn"
         calls = 0
-        activation_quantization_groups = None
+        X_blocks = None
 
         def optimize_quantization_group_scales(
             self,
             weight,
             *,
-            activation_quantization_groups,
+            X_blocks,
             weight_metric,
             alpha_dtype,
         ):
             assert alpha_dtype is torch.float32
-            assert activation_quantization_groups.shape[:2] == (weight.shape[0], 16)
+            assert X_blocks.shape[:2] == (weight.shape[0], 16)
             assert weight.shape == (3, 2, 16)
             assert torch.equal(
                 weight_metric,
-                activation_quantization_groups.square().mean(dim=2),
+                X_blocks.square().mean(dim=2),
             )
-            self.activation_quantization_groups = activation_quantization_groups.clone()
+            self.X_blocks = X_blocks.clone()
             self.calls += 1
             quantization_group_count, rows, width = weight.shape
             alpha = torch.arange(
@@ -235,7 +234,7 @@ def test_rtn_optimizes_all_groups_once_and_preserves_result_layout():
     for quantization_group_index in range(3):
         column_start = quantization_group_index * 16
         assert torch.equal(
-            observer.activation_quantization_groups[
+            observer.X_blocks[
                 quantization_group_index : quantization_group_index + 1
             ],
             activations[:, column_start : column_start + 16].T.unsqueeze(0),
@@ -246,9 +245,9 @@ def test_rtn_optimizes_all_groups_once_and_preserves_result_layout():
         expected_gamma_w_star,
         dtype=torch.float8_e4m3fn,
     )
-    assert torch.equal(result.alpha_star, expected_alpha_star)
+    assert torch.equal(result.alpha, expected_alpha_star)
     assert torch.equal(
-        result.gamma_w_star,
+        result.gamma_w_final,
         expected_gamma_w_star,
     )
     assert torch.equal(result.weight_zero_point, expected_weight_zero_point)
@@ -262,12 +261,12 @@ def test_rtn_omits_activation_groups_for_weight_only():
             self,
             weight,
             *,
-            activation_quantization_groups,
+            X_blocks,
             weight_metric,
             alpha_dtype,
         ):
             seen.append(weight.shape[0])
-            assert activation_quantization_groups is None
+            assert X_blocks is None
             return OptimizedQuantizationGroupScales(
                 torch.ones(3, 16),
                 torch.ones(3, 2, 1),
@@ -393,17 +392,17 @@ def test_optimize_rtn_returns_canonical_alpha_and_final_e4m3_gamma():
         sigma_x_squared=batches[0].square().mean(dim=0),
     )
 
-    assert result._fields == ("alpha_star", "gamma_w_star", "weight_zero_point")
-    assert result.alpha_star.shape == (32,)
-    assert result.gamma_w_star.shape == (3, 2)
+    assert result._fields == ("alpha", "gamma_w_final", "weight_zero_point")
+    assert result.alpha.shape == (32,)
+    assert result.gamma_w_final.shape == (3, 2)
     assert result.weight_zero_point.shape == (3, 2)
     assert torch.equal(
-        result.alpha_star,
-        result.alpha_star.to(torch.bfloat16).float(),
+        result.alpha,
+        result.alpha.to(torch.bfloat16).float(),
     )
     assert torch.equal(
-        result.gamma_w_star,
-        result.gamma_w_star.to(torch.float8_e4m3fn).float(),
+        result.gamma_w_final,
+        result.gamma_w_final.to(torch.float8_e4m3fn).float(),
     )
     assert torch.count_nonzero(result.weight_zero_point.float()) == 0
 
@@ -421,12 +420,12 @@ def test_cached_sigma_x_squared_matches_legacy_rtn_numerically():
         / activations.shape[0]
     )
     weight_quantization_groups = weight.reshape(3, 2, 16).permute(1, 0, 2).contiguous()
-    activation_quantization_groups = (
+    X_blocks = (
         activations.reshape(17, 2, 16).permute(1, 2, 0).contiguous()
     )
     learned, legacy_sigma_x_squared = _legacy_optimize_joint_scales(
         weight_quantization_groups,
-        activation_quantization_groups,
+        X_blocks,
         steps=2,
         lr=0.01,
     )
@@ -464,13 +463,13 @@ def test_cached_sigma_x_squared_matches_legacy_rtn_numerically():
         rtol=1e-6,
     )
     torch.testing.assert_close(
-        result.alpha_star,
-        legacy_optimized.alpha_star.reshape(32),
+        result.alpha,
+        legacy_optimized.alpha.reshape(32),
         atol=1e-6,
         rtol=1e-6,
     )
     assert torch.equal(
-        result.gamma_w_star,
+        result.gamma_w_final,
         legacy_scales.squeeze(-1).transpose(0, 1),
     )
     assert torch.equal(

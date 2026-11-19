@@ -1,6 +1,5 @@
-from llmcompressor_osfp4 import (
-    observers as _osfp4_observer,  # noqa: F401  registers "osfp4" observer
-)
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the OSFP4 and vLLM projects
 
 from .base import OSFP4Modifier
 

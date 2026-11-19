@@ -17,7 +17,15 @@ generated locally from fixed seeds. No Hugging Face downloads are needed.
 "$PUBLIC_PY" tests/parity/diagonal.py compare output/reference output/public
 ```
 
-The comparison covers a two-layer Qwen3 model with grouped attention in
+To check every production Python file in the public calibration package against the pinned Git tree, run
+
+```bash
+python3 tests/parity/check_source.py /path/to/llm-compressor-for-osfp4
+```
+
+The checker compares shared modules byte for byte after translating package imports. It lists the files for stock LLM Compressor integration and each deployment format, and fails on unexpected public files.
+
+The tensor comparison covers a two-layer Qwen3 model with grouped attention in
 NVFP4 and NVFP4A16, each with RTN and SIC. It checks the input state, sampled
 indices, calibration statistics, optimizer inputs, initial and learned scales,
 rounded alpha, selected scales, zero points, SIC weights, a fixed-input forward

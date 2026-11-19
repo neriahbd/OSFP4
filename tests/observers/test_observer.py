@@ -98,7 +98,7 @@ def test_joint_optimization_and_scale_selection_are_separate(monkeypatch):
 
     optimized = observer.optimize_quantization_group_scales(
         weight,
-        activation_quantization_groups=activations,
+        X_blocks=activations,
         weight_metric=metric,
         alpha_dtype=torch.bfloat16,
     )
@@ -112,8 +112,8 @@ def test_joint_optimization_and_scale_selection_are_separate(monkeypatch):
     assert torch.equal(seen["activations"], activations)
     assert torch.equal(seen["kwargs"].pop("weight_metric"), metric)
     assert seen["kwargs"] == {"steps": 7, "lr": 0.2}
-    assert torch.equal(optimized.alpha_star, alpha.to(torch.bfloat16).float())
-    assert torch.equal(seen["alpha"], optimized.alpha_star)
+    assert torch.equal(optimized.alpha, alpha.to(torch.bfloat16).float())
+    assert torch.equal(seen["alpha"], optimized.alpha)
     assert torch.equal(scales, selected)
     assert zero_points.dtype == observer.args.zp_dtype
 
@@ -137,7 +137,7 @@ def test_missing_activations_selects_weight_only_optimization(monkeypatch):
         alpha_dtype=torch.float32,
     )
 
-    assert torch.equal(actual.alpha_star, learned.alpha)
+    assert torch.equal(actual.alpha, learned.alpha)
     assert torch.equal(actual.gamma_w, learned.gamma_w)
     assert seen["kwargs"] == {"steps": 7, "lr": 0.2}
 

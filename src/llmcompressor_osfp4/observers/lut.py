@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the OSFP4 and vLLM projects
+
 import numpy as np
 import torch
 
@@ -32,11 +35,12 @@ _LUT_INTERPOLATION_CACHE: dict[
 
 def _g_antiderivative(t: np.ndarray, quantized_value: float) -> np.ndarray:
     """Evaluate the antiderivative within one constant FP4 region."""
-    p1 = np.exp2(-t)
+    inverse_magnitude = np.exp2(-t)
     return (
         t
-        + (2.0 * quantized_value / _LN2) * p1
-        - (quantized_value * quantized_value / (2.0 * _LN2)) * (p1 * p1)
+        + (2.0 * quantized_value / _LN2) * inverse_magnitude
+        - (quantized_value * quantized_value / (2.0 * _LN2))
+        * (inverse_magnitude * inverse_magnitude)
     )
 
 
@@ -65,13 +69,13 @@ def _integrate_g_over_interval(start: float, end: float) -> float:
 
 def _phi(log2_x: np.ndarray) -> np.ndarray:
     """Compute phi as a sliding one-octave integral of g."""
-    L = np.asarray(log2_x, dtype=np.float64)
-    flat = L.ravel()
-    out = np.array(
+    log2_values = np.asarray(log2_x, dtype=np.float64)
+    flat = log2_values.ravel()
+    phi_values = np.array(
         [_integrate_g_over_interval(li - 1.0, li) for li in flat],
         dtype=np.float64,
     )
-    return out.reshape(L.shape)
+    return phi_values.reshape(log2_values.shape)
 
 
 def _get_phi_lut(
@@ -85,9 +89,11 @@ def _get_phi_lut(
     if cached is not None:
         return cached
 
-    n = int(round((_LUT_LOG2_MAX - _LUT_LOG2_MIN) / _LUT_LOG2_STEP)) + 1
-    t_np = _LUT_LOG2_MIN + _LUT_LOG2_STEP * np.arange(n, dtype=np.float64)
-    phi_np = _phi(t_np)
+    num_entries = int(round((_LUT_LOG2_MAX - _LUT_LOG2_MIN) / _LUT_LOG2_STEP)) + 1
+    log2_grid = _LUT_LOG2_MIN + _LUT_LOG2_STEP * np.arange(
+        num_entries, dtype=np.float64
+    )
+    phi_np = _phi(log2_grid)
 
     table = torch.from_numpy(phi_np).to(dtype=dtype).to(device=device)
     _PHI_LUT_CACHE[key] = table
@@ -117,19 +123,20 @@ def _get_lut_interpolation_data(
 
 
 def _interpolate_lut_at_position(
-    pos: torch.Tensor,
+    positions: torch.Tensor,
     cell_start_values: torch.Tensor,
     cell_slopes: torch.Tensor,
 ) -> torch.Tensor:
     """Interpolate clamped positions with detached integer indices."""
     cells = cell_start_values.shape[0]
-    pos = pos.clamp(0.0, float(cells - 1))
-    idx = pos.detach().to(torch.int32)  # pos >= 0, so truncation == floor
-    frac = pos - idx.to(pos.dtype)
-    flat = idx.reshape(-1)
-    cell_start = torch.index_select(cell_start_values, 0, flat).view_as(frac)
-    cell_slope = torch.index_select(cell_slopes, 0, flat).view_as(frac)
-    return cell_start + frac * cell_slope
+    positions = positions.clamp(0.0, float(cells - 1))
+    # positions >= 0, so truncation == floor
+    cell_indices = positions.detach().to(torch.int32)
+    cell_fractions = positions - cell_indices.to(positions.dtype)
+    flat = cell_indices.reshape(-1)
+    cell_start = torch.index_select(cell_start_values, 0, flat).view_as(cell_fractions)
+    cell_slope = torch.index_select(cell_slopes, 0, flat).view_as(cell_fractions)
+    return cell_start + cell_fractions * cell_slope
 
 
 def phi_lut(value: torch.Tensor) -> torch.Tensor:
@@ -137,6 +144,6 @@ def phi_lut(value: torch.Tensor) -> torch.Tensor:
     starts, slopes = _get_lut_interpolation_data(value.device, value.dtype)
     entries = starts.shape[0] + 1
     magnitudes = value.abs().clamp(min=2.0**_LUT_LOG2_MIN)
-    pos = (torch.log2(magnitudes) - _LUT_LOG2_MIN) / _LUT_LOG2_STEP
-    pos = pos.clamp(min=0.0, max=float(entries - 2))
-    return _interpolate_lut_at_position(pos, starts, slopes)
+    positions = (torch.log2(magnitudes) - _LUT_LOG2_MIN) / _LUT_LOG2_STEP
+    positions = positions.clamp(min=0.0, max=float(entries - 2))
+    return _interpolate_lut_at_position(positions, starts, slopes)

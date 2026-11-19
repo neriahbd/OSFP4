@@ -1,14 +1,17 @@
-"""Sequential importance compensation for OSFP4."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the OSFP4 and vLLM projects
+
+"""Successive interference cancellation for OSFP4."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
+from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA
 from torch.nn import Linear
 
 from llmcompressor_osfp4.observers import OptimizedQuantizationGroupScales
-from llmcompressor_osfp4.observers.fp4 import quantize_e2m1
 
 from ._activation_groups import assemble_activation_quantization_groups
 
@@ -22,7 +25,6 @@ __all__ = [
     "optimize_sic",
 ]
 
-SIC_PRECISION = torch.float32
 _QUANTIZATION_GROUP_SIZE = 16
 
 
@@ -30,13 +32,13 @@ def make_empty_hessian(
     module: Linear,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Allocate an FP32 raw input Gram matrix for an OSFP4 Linear module."""
+    """Allocate an FP32 Hessian matrix for an OSFP4 Linear module."""
     device = module.weight.device if device is None else device
-    columns = module.weight.shape[1]
+    n = module.weight.shape[1]
     return torch.zeros(
-        (columns, columns),
+        (n, n),
         device=device,
-        dtype=SIC_PRECISION,
+        dtype=torch.float32,
     )
 
 
@@ -45,17 +47,19 @@ def accumulate_hessian(
     module: Linear,
     hessian: torch.Tensor,
 ) -> torch.Tensor:
-    """Accumulate the raw FP32 activation Gram matrix ``X.T @ X``."""
-    flat = inp.to(device=hessian.device, dtype=SIC_PRECISION).reshape(-1, inp.shape[-1])
-    hessian.addmm_(flat.transpose(0, 1), flat)
+    """Accumulate the FP32 Hessian matrix using ``X.T @ X``."""
+    X_rows = inp.to(device=hessian.device, dtype=torch.float32).reshape(
+        -1, inp.shape[-1]
+    )
+    hessian.addmm_(X_rows.transpose(0, 1), X_rows)
     return hessian
 
 
 class SICQuantizationResult(NamedTuple):
     """Final SIC qparams and post-alpha quantized weights for one mapping."""
 
-    alpha_star: torch.Tensor
-    gamma_w_star: torch.Tensor
+    alpha: torch.Tensor
+    gamma_w_final: torch.Tensor
     weight_zero_point: torch.Tensor
     quantized_weight: torch.Tensor
 
@@ -63,7 +67,7 @@ class SICQuantizationResult(NamedTuple):
 def optimize_sic(
     W: torch.Tensor,
     cached_activation_batches: list[torch.Tensor] | tuple[torch.Tensor, ...] | None,
-    hessian: torch.Tensor,
+    sigma_x: torch.Tensor,
     *,
     observer: OSFP4Observer,
     alpha_dtype: torch.dtype,
@@ -71,87 +75,76 @@ def optimize_sic(
     percdamp: float = 0.01,
 ) -> SICQuantizationResult:
     """Optimize qparams and run right-to-left SIC for one validated mapping."""
-    # Factor the damped second moment without mutating the cached Hessian.
-    num_rows, num_columns = W.shape
+    m, n = W.shape
     W = W.detach().to(dtype=torch.float32)
-    H = hessian.detach().to(device=W.device, dtype=torch.float32).clone()
-    damp = percdamp * torch.mean(torch.diag(H))
-    diag = torch.arange(H.shape[0], device=H.device)
-    H[diag, diag] += damp
-    U = torch.linalg.cholesky(H, upper=True)
-    diag_U = torch.diag(U)
-    del H
+    sigma_x_damped = sigma_x.detach().to(device=W.device, dtype=torch.float32).clone()
+    damp = percdamp * torch.mean(torch.diag(sigma_x_damped))
+    diag = torch.arange(sigma_x_damped.shape[0], device=sigma_x_damped.device)
+    sigma_x_damped[diag, diag] += damp
+    U = torch.linalg.cholesky(sigma_x_damped, upper=True)
+    U_diag = torch.diag(U)
+    del sigma_x_damped
 
-    # Optimize original-weight groups together, defer E4M3 selection to the sweep.
-    groups = num_columns // _QUANTIZATION_GROUP_SIZE
-    weight_groups = (
-        W.reshape(num_rows, groups, _QUANTIZATION_GROUP_SIZE)
-        .permute(1, 0, 2)
-        .contiguous()
-    )
-    metric = diag_U.square().reshape(
-        groups,
-        _QUANTIZATION_GROUP_SIZE,
-    )
-    activation_groups = None
+    L = n // _QUANTIZATION_GROUP_SIZE
+    W_blocks = W.reshape(m, L, _QUANTIZATION_GROUP_SIZE).permute(1, 0, 2).contiguous()
+    u_diag_squared_blocks = U_diag.square().reshape(L, _QUANTIZATION_GROUP_SIZE)
+    X_blocks = None
     if cached_activation_batches is not None:
-        activation_groups = assemble_activation_quantization_groups(
-            cached_activation_batches, groups, W.device
+        X_blocks = assemble_activation_quantization_groups(
+            cached_activation_batches, L, W.device
         )
     optimized = observer.optimize_quantization_group_scales(
-        weight_groups,
-        activation_quantization_groups=activation_groups,
-        weight_metric=metric,
+        W_blocks,
+        X_blocks=X_blocks,
+        weight_metric=u_diag_squared_blocks,
         alpha_dtype=alpha_dtype,
     )
-    del weight_groups, activation_groups
+    del W_blocks, X_blocks
 
-    # Store each block's selected qparams in checkpoint layout.
-    alpha_values = optimized.alpha_star.reshape(num_columns)
-    scale_values = W.new_empty((num_rows, groups))
-    zero_point_values = torch.empty_like(scale_values)
+    alpha = optimized.alpha.reshape(n)
+    gamma_w_final = W.new_empty((m, L))
+    weight_zero_point = torch.empty_like(gamma_w_final)
 
-    # Quantize right-to-left and propagate the alpha-restored residual.
     Y = U @ W.transpose(0, 1)
-    Q = torch.zeros_like(W)
-    for block_idx in range(groups - 1, -1, -1):
+    W_hat = torch.zeros_like(W)
+    for block_idx in range(L - 1, -1, -1):
         block_start = block_idx * _QUANTIZATION_GROUP_SIZE
         block_end = block_start + _QUANTIZATION_GROUP_SIZE
 
-        U_local = U[block_start:block_end, block_start:block_end]
-        U_diag_block = diag_U[block_start:block_end]
-        U_upper_strict = torch.triu(U_local, diagonal=1)
-        W_local = W[:, block_start:block_end]
-        unwanted_cross_terms = U_upper_strict @ W_local.transpose(0, 1)
-        Y_local = Y[block_start:block_end, :]
-        T_eff = (
-            ((Y_local - unwanted_cross_terms) / U_diag_block[:, None])
-            .transpose(0, 1)
-            .unsqueeze(0)
+        U_block = U[block_start:block_end, block_start:block_end]
+        U_block_diag = U_diag[block_start:block_end]
+        U_block_causal = torch.triu(U_block, diagonal=1)
+        W_l = W[:, block_start:block_end]
+        Y_block = Y[block_start:block_end, :]
+        Y_block_approx = Y_block - U_block_causal @ W_l.transpose(0, 1)
+        W_block_target = (
+            (Y_block_approx / U_block_diag[:, None]).transpose(0, 1).unsqueeze(0)
         )
         block_optimized = OptimizedQuantizationGroupScales(
-            optimized.alpha_star[block_idx : block_idx + 1],
+            optimized.alpha[block_idx : block_idx + 1],
             optimized.gamma_w[block_idx : block_idx + 1],
         )
         scales, zero_points = observer.select_weight_qparams(
-            T_eff,
+            W_block_target,
             block_optimized,
-            weight_metric=metric[block_idx : block_idx + 1],
+            weight_metric=u_diag_squared_blocks[block_idx : block_idx + 1],
         )
-        scale_1d = scales.view(-1)
-        scale_values[:, block_idx] = scale_1d
-        zero_point_values[:, block_idx] = zero_points.view(-1)
-        opt_alpha_block = optimized.alpha_star[block_idx]
+        gamma_w_final_l = scales.view(-1)
+        gamma_w_final[:, block_idx] = gamma_w_final_l
+        weight_zero_point[:, block_idx] = zero_points.view(-1)
+        alpha_l = optimized.alpha[block_idx]
 
-        for ii in range(block_end - 1, block_start - 1, -1):
-            alpha_i = opt_alpha_block[ii - block_start]
-            q_i = quantize_e2m1((Y[ii, :] / U[ii, ii]) / (alpha_i * scale_1d))
-            Q[:, ii] = (q_i * scale_1d).to(dtype=weight_dtype).float()
-            Y[:ii, :] -= U[:ii, ii].unsqueeze(1) * (alpha_i * Q[:, ii]).unsqueeze(0)
+        for t in range(block_end - 1, block_start - 1, -1):
+            alpha_r = alpha_l[t - block_start]
+            W_SIC_t = FP4_E2M1_DATA.cast_to_fp4(
+                (Y[t, :] / U[t, t]) / (alpha_r * gamma_w_final_l)
+            )
+            W_hat[:, t] = (W_SIC_t * gamma_w_final_l).to(dtype=weight_dtype).float()
+            Y[:t, :] -= U[:t, t].unsqueeze(1) * (alpha_r * W_hat[:, t]).unsqueeze(0)
 
     return SICQuantizationResult(
-        alpha_star=alpha_values,
-        gamma_w_star=scale_values,
-        weight_zero_point=zero_point_values,
-        quantized_weight=Q,
+        alpha=alpha,
+        gamma_w_final=gamma_w_final,
+        weight_zero_point=weight_zero_point,
+        quantized_weight=W_hat,
     )

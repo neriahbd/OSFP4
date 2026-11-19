@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the OSFP4 and vLLM projects
+
 from typing import NamedTuple
 
 import torch
 from loguru import logger
 
 from llmcompressor.observers.base import Observer
+
 from .loss import (
     JointLossCoefficients,
     build_joint_loss_coefficients,
@@ -12,12 +16,12 @@ from .loss import (
     compute_weight_loss,
 )
 from .scale_optimization import (
+    LogScaleParameters,
     QuantizationGroupScaleValues,
     canonicalize_log_scale_parameters,
     create_log_scale_parameters,
     initialize_scale_values_from_absmax,
     materialize_scale_values,
-    LogScaleParameters,
     run_chunked_optimizer,
     select_blocks_per_chunk,
     uses_exact_alpha_reduction,
@@ -30,9 +34,9 @@ from .scale_selection import (
 
 
 class OptimizedQuantizationGroupScales(NamedTuple):
-    """Deployment-rounded alpha and continuous weight gamma before E4M3 selection."""
+    """Deployment-rounded alpha ``[L, 16]`` and continuous gamma_w ``[L, m, 1]``."""
 
-    alpha_star: torch.Tensor
+    alpha: torch.Tensor
     gamma_w: torch.Tensor
 
 
@@ -147,7 +151,9 @@ def _optimize_weight_scales(
 
 @Observer.register("osfp4")
 class OSFP4Observer(Observer):
-    """Optimize alpha and return NVFP4 quantization-group qparams."""
+    """Optimize alpha and return NVFP4 block qparams."""
+
+    _act_sync_dict = {}
 
     # Calibration statistics
 
@@ -160,80 +166,80 @@ class OSFP4Observer(Observer):
 
     def optimize_quantization_group_scales(
         self,
-        weight: torch.Tensor,
+        W_blocks: torch.Tensor,
         *,
-        activation_quantization_groups: torch.Tensor | None = None,
+        X_blocks: torch.Tensor | None = None,
         weight_metric: torch.Tensor,
         alpha_dtype: torch.dtype,
     ) -> OptimizedQuantizationGroupScales:
-        """Optimize continuous scales for independent OSFP4 quantization groups."""
-        weight = weight.detach().to(dtype=torch.float32)
+        """Optimize continuous scales for L independent OSFP4 blocks."""
+        W_blocks = W_blocks.detach().to(dtype=torch.float32)
         weight_metric = weight_metric.detach().to(
-            device=weight.device,
+            device=W_blocks.device,
             dtype=torch.float32,
         )
-        config = self.args.observer_kwargs
-        if activation_quantization_groups is None:
-            learned = _optimize_weight_scales(
-                weight,
+        optimizer_config = self.args.observer_kwargs
+        if X_blocks is None:
+            learned_scales = _optimize_weight_scales(
+                W_blocks,
                 weight_metric,
-                steps=config["num_iters"],
-                lr=config["lr"],
+                steps=optimizer_config["num_iters"],
+                lr=optimizer_config["lr"],
             )
         else:
-            learned = _optimize_joint_scales(
-                weight,
-                activation_quantization_groups,
+            learned_scales = _optimize_joint_scales(
+                W_blocks,
+                X_blocks,
                 weight_metric=weight_metric,
-                steps=config["num_iters"],
-                lr=config["lr"],
+                steps=optimizer_config["num_iters"],
+                lr=optimizer_config["lr"],
             )
 
-        alpha_star = learned.alpha.to(dtype=alpha_dtype).float()
-        valid = (
-            torch.isfinite(alpha_star).all()
-            & torch.all(alpha_star > 0)
-            & torch.isfinite(learned.gamma_w).all()
-            & torch.all(learned.gamma_w > 0)
+        alpha = learned_scales.alpha.to(dtype=alpha_dtype).float()
+        scales_valid = (
+            torch.isfinite(alpha).all()
+            & torch.all(alpha > 0)
+            & torch.isfinite(learned_scales.gamma_w).all()
+            & torch.all(learned_scales.gamma_w > 0)
         )
-        if learned.gamma_x is not None:
-            valid = (
-                valid
-                & torch.isfinite(learned.gamma_x).all()
-                & torch.all(learned.gamma_x > 0)
+        if learned_scales.gamma_x is not None:
+            scales_valid = (
+                scales_valid
+                & torch.isfinite(learned_scales.gamma_x).all()
+                & torch.all(learned_scales.gamma_x > 0)
             )
-        if not valid:
+        if not scales_valid:
             raise ValueError("OSFP4 observer produced invalid scales")
 
-        return OptimizedQuantizationGroupScales(alpha_star, learned.gamma_w)
+        return OptimizedQuantizationGroupScales(alpha, learned_scales.gamma_w)
 
     # Checkpoint scale selection
 
     def select_weight_qparams(
         self,
-        weight: torch.Tensor,
-        optimized: OptimizedQuantizationGroupScales,
+        W_target_blocks: torch.Tensor,
+        optimized_scales: OptimizedQuantizationGroupScales,
         *,
         weight_metric: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Select independent E4M3 qparams using the full-mapping metric."""
-        scales, invalid_rows, fallback_used = _search_e4m3_gamma_star(
-            weight,
-            optimized.alpha_star,
-            optimized.gamma_w,
+        """Select E4M3 gamma_w_final ``[L, m, 1]`` and corresponding zero points."""
+        gamma_w_final, invalid_rows, fallback_used = _search_e4m3_gamma_star(
+            W_target_blocks,
+            optimized_scales.alpha,
+            optimized_scales.gamma_w,
             weight_metric,
         )
 
         # Read both device flags together at the existing validation boundary.
-        invalid, used_fallback = torch.stack(
+        has_invalid_rows, used_fallback = torch.stack(
             (invalid_rows.any(), fallback_used)
         ).tolist()
         if used_fallback:
             logger.warning(
                 "OSFP4: empty scale candidate set; applied boundary fallback."
             )
-        if invalid:
+        if has_invalid_rows:
             raise ValueError("OSFP4 observer produced invalid checkpoint scales")
 
-        zero_points = torch.zeros_like(scales, dtype=self.args.zp_dtype)
-        return scales, zero_points
+        zero_points = torch.zeros_like(gamma_w_final, dtype=self.args.zp_dtype)
+        return gamma_w_final, zero_points

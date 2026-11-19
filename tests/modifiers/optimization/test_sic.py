@@ -15,7 +15,7 @@ from llmcompressor_osfp4.observers import (
     scale_selection,
 )
 from llmcompressor_osfp4.observers import observer as osfp4_observer
-from llmcompressor_osfp4.observers.fp4 import quantize_e2m1
+from tests.observers._fp4_reference import quantize_e2m1
 
 
 def _make_observer(
@@ -78,8 +78,8 @@ def _reference_cholesky_state(weight, hessian, percdamp=0.01):
 def _legacy_lower_sic_quantization(
     weight,
     hessian,
-    alpha_star,
-    gamma_w_star,
+    alpha,
+    gamma_w_final,
     *,
     weight_dtype,
     percdamp=0.01,
@@ -94,13 +94,13 @@ def _legacy_lower_sic_quantization(
     quantized_weight = torch.empty_like(weight)
 
     for index in range(weight.shape[1] - 1, -1, -1):
-        scale = gamma_w_star[:, index // 16]
+        scale = gamma_w_final[:, index // 16]
         target = residual[:, index] / lower[index, index]
-        denominator = alpha_star[index] * scale
+        denominator = alpha[index] * scale
         code = quantize_e2m1(target / denominator)
         dequantized = (code * scale).to(weight_dtype).float()
         quantized_weight[:, index] = dequantized
-        reconstructed = alpha_star[index] * dequantized
+        reconstructed = alpha[index] * dequantized
         residual[:, :index] -= reconstructed.unsqueeze(1) * lower[
             index, :index
         ].unsqueeze(0)
@@ -139,7 +139,7 @@ def _exhaustive_sic_scale_search(
 def _reference_sequential_scale_search(weight, U, optimized, weight_dtype):
     """Score the image's objective directly, using reconstructed right blocks."""
     rows, columns = weight.shape
-    alpha = optimized.alpha_star.flatten()
+    alpha = optimized.alpha.flatten()
     grid = scale_selection._get_e4m3_scale_grid(weight.device, torch.float32)
     selected = torch.empty(rows, columns // 16)
     reconstructed = torch.zeros_like(weight)
@@ -213,21 +213,21 @@ def test_sic_matches_image_objective_and_feedback_reference(
     expected_scales, expected_weight = _reference_sequential_scale_search(
         weight, U, learned[0], dtype
     )
-    torch.testing.assert_close(result.gamma_w_star, expected_scales, rtol=0, atol=0)
+    torch.testing.assert_close(result.gamma_w_final, expected_scales, rtol=0, atol=0)
     torch.testing.assert_close(result.quantized_weight, expected_weight, rtol=0, atol=0)
     original_scales = (
         _exhaustive_sic_scale_search(
             weight.reshape(5, groups, 16).permute(1, 0, 2),
-            learned[0].alpha_star,
+            learned[0].alpha,
             learned[0].gamma_w,
             U.diag().reshape(groups, 16),
         )
         .squeeze(-1)
         .T
     )
-    assert torch.equal(result.gamma_w_star[:, -1], original_scales[:, -1])
+    assert torch.equal(result.gamma_w_final[:, -1], original_scales[:, -1])
     if groups > 1:
-        assert not torch.equal(result.gamma_w_star[:, :-1], original_scales[:, :-1])
+        assert not torch.equal(result.gamma_w_final[:, :-1], original_scales[:, :-1])
     assert torch.count_nonzero(result.weight_zero_point) == 0
     assert torch.equal(weight, before_weight)
     assert torch.equal(hessian, before_hessian)
@@ -246,13 +246,13 @@ def test_sic_zero_weight_ties_and_boundary_fallback(monkeypatch, gamma):
     result = optimize_sic(weight, None, torch.eye(32), observer=observer)
     expected = _exhaustive_sic_scale_search(
         torch.zeros(2, 3, 16),
-        optimized.alpha_star,
+        optimized.alpha,
         optimized.gamma_w,
         torch.ones(2, 16),
     )
     if gamma == 1e20:
         expected.fill_(448.0)
-    assert torch.equal(result.gamma_w_star, expected.squeeze(-1).T)
+    assert torch.equal(result.gamma_w_final, expected.squeeze(-1).T)
     assert torch.count_nonzero(result.quantized_weight) == 0
     assert torch.count_nonzero(result.weight_zero_point) == 0
 
@@ -389,7 +389,7 @@ def test_normalized_hessian_preserves_discrete_sic_outputs():
         observer=_make_observer(steps=0, weight_only=True),
     )
 
-    assert torch.equal(normalized.gamma_w_star, raw.gamma_w_star)
+    assert torch.equal(normalized.gamma_w_final, raw.gamma_w_final)
     assert torch.equal(normalized.weight_zero_point, raw.weight_zero_point)
     assert torch.equal(normalized.quantized_weight, raw.quantized_weight)
 
@@ -424,7 +424,7 @@ def test_sic_scale_selection_includes_completed_blocks_feedback(
     assert len(seen_targets) == 2
     U, _ = _reference_cholesky_state(weight, _reference_hessian(batches))
     torch.testing.assert_close(seen_targets[0][0], weight[:, 16:])
-    reconstructed = result.quantized_weight * result.alpha_star
+    reconstructed = result.quantized_weight * result.alpha
     feedback = U[:16, 16:] @ (weight[:, 16:] - reconstructed[:, 16:]).T
     expected_target = weight[:, :16] + (feedback / U.diag()[:16, None]).T
     torch.testing.assert_close(seen_targets[1][0], expected_target)
@@ -494,12 +494,12 @@ def test_sic_selects_scales_after_full_mapping_optimization():
             weight,
             *,
             weight_metric,
-            activation_quantization_groups,
+            X_blocks,
             alpha_dtype,
         ):
             events.append("optimize")
             assert weight.shape == (2, 2, 16)
-            assert activation_quantization_groups.shape == (2, 16, 12)
+            assert X_blocks.shape == (2, 16, 12)
             assert weight_metric.shape == (2, 16)
             return OptimizedQuantizationGroupScales(
                 torch.ones(2, 16),
@@ -510,7 +510,7 @@ def test_sic_selects_scales_after_full_mapping_optimization():
             events.append("select")
             assert events[0] == "optimize"
             assert weight.shape == (1, 2, 16)
-            assert optimized.alpha_star.shape == (1, 16)
+            assert optimized.alpha.shape == (1, 16)
             assert weight_metric.shape == (1, 16)
             return optimized.gamma_w, torch.zeros_like(optimized.gamma_w)
 
@@ -550,7 +550,7 @@ def test_sic_runner_matches_block_selection_and_residual_reference(
             weight,
             *,
             weight_metric,
-            activation_quantization_groups,
+            X_blocks,
             alpha_dtype,
         ):
             assert alpha_dtype is torch.float32
@@ -559,8 +559,8 @@ def test_sic_runner_matches_block_selection_and_residual_reference(
                     "event": "optimize",
                     "weight": weight.clone(),
                     "weight_metric": weight_metric.clone(),
-                    "activation_quantization_groups": (
-                        activation_quantization_groups.clone()
+                    "X_blocks": (
+                        X_blocks.clone()
                     ),
                 }
             )
@@ -596,7 +596,7 @@ def test_sic_runner_matches_block_selection_and_residual_reference(
         quantize_inputs.append(values.clone())
         return original_quantize(values)
 
-    monkeypatch.setattr(sic, "quantize_e2m1", record_quantize)
+    monkeypatch.setattr(sic.FP4_E2M1_DATA, "cast_to_fp4", record_quantize)
     result = _optimize_sic(
         weight,
         [batch],
@@ -612,7 +612,7 @@ def test_sic_runner_matches_block_selection_and_residual_reference(
     expected_activation_quantization_groups = batch.reshape(48, 2, 16).permute(1, 2, 0)
     assert torch.equal(calls[0]["weight"], expected_weight_quantization_groups)
     assert torch.equal(
-        calls[0]["activation_quantization_groups"],
+        calls[0]["X_blocks"],
         expected_activation_quantization_groups,
     )
     assert torch.equal(
@@ -659,8 +659,8 @@ def test_sic_runner_matches_block_selection_and_residual_reference(
             )
             quantize_call_index += 1
 
-    assert torch.equal(result.alpha_star, expected_alpha_star)
-    assert torch.equal(result.gamma_w_star, expected_weight_scale)
+    assert torch.equal(result.alpha, expected_alpha_star)
+    assert torch.equal(result.gamma_w_final, expected_weight_scale)
     assert torch.equal(result.weight_zero_point, expected_weight_zero_point)
     assert torch.equal(result.quantized_weight, expected_quantized_weight)
 
@@ -680,24 +680,24 @@ def test_sic_reverse_updates_and_quantized_weight_match_reference():
     expected_quantized_weight = torch.empty_like(weight)
 
     for index in range(31, -1, -1):
-        scale = result.gamma_w_star[:, index // 16]
+        scale = result.gamma_w_final[:, index // 16]
         target = transformed[index, :] / U[index, index]
-        denominator = result.alpha_star[index] * scale
+        denominator = result.alpha[index] * scale
         code = quantize_e2m1(target / denominator)
         dequantized_weight = (code * scale).to(torch.bfloat16).float()
-        actual = result.alpha_star[index] * dequantized_weight
+        actual = result.alpha[index] * dequantized_weight
         expected_quantized_weight[:, index] = dequantized_weight
         transformed[:index, :] -= U[:index, index].unsqueeze(1) * actual.unsqueeze(0)
 
     assert result._fields == (
-        "alpha_star",
-        "gamma_w_star",
+        "alpha",
+        "gamma_w_final",
         "weight_zero_point",
         "quantized_weight",
     )
     assert torch.equal(
-        result.alpha_star,
-        result.alpha_star.to(torch.bfloat16).float(),
+        result.alpha,
+        result.alpha.to(torch.bfloat16).float(),
     )
     assert torch.equal(result.quantized_weight, expected_quantized_weight)
     assert torch.count_nonzero(result.weight_zero_point) == 0
@@ -722,8 +722,8 @@ def test_upper_sic_matches_lower_quantization_with_sequentially_selected_scales(
     legacy_weight = _legacy_lower_sic_quantization(
         weight,
         hessian,
-        result.alpha_star,
-        result.gamma_w_star,
+        result.alpha,
+        result.gamma_w_final,
         weight_dtype=torch.bfloat16,
     )
 

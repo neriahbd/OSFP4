@@ -9,7 +9,7 @@ The default matrix covers both pipelines, both modes, both schemes, steps 0/1/80
 with sampled/full/disabled sampling for NVFP4 (48 cases per source). Use --steps 0
 for a smoke run. Outputs contain raw byte traces, compressed saves, worker logs,
 and a report. No models, tokenizers, or datasets are downloaded. Source paths must
-contain llmcompressor; the worker imports exclusively from the selected snapshot.
+contain llmcompressor_osfp4; the worker imports exclusively from the selected snapshot.
 """
 
 import argparse
@@ -79,8 +79,18 @@ def instrument(stack, trace, model):
     from llmcompressor_osfp4.observers import observer
 
     names = {module: name for name, module in model.named_modules()}
-    original_quantize = base.quantize_mapping
-    original_optimizer = observer.run_optimizer
+    quantize_name = (
+        "prepare_mapping_deployment"
+        if hasattr(base, "prepare_mapping_deployment")
+        else "quantize_mapping"
+    )
+    original_quantize = getattr(base, quantize_name)
+    optimizer_name = (
+        "run_chunked_optimizer"
+        if hasattr(observer, "run_chunked_optimizer")
+        else "run_optimizer"
+    )
+    original_optimizer = getattr(observer, optimizer_name)
     original_step = torch.optim.Adam.step
     original_initialize = base.OSFP4Modifier.on_initialize
     original_start = base.OSFP4Modifier.on_calibration_start
@@ -98,7 +108,11 @@ def instrument(stack, trace, model):
                         "args": obs.args.model_dump(mode="json"),
                         "min": getattr(obs, "min_vals", None),
                         "max": getattr(obs, "max_vals", None),
-                        "fusions": [names[ref()] for ref in obs._fusions.values()],
+                        "fusions": (
+                            [names[h.module] for h in obs.fusion_handler._group]
+                            if hasattr(obs, "fusion_handler")
+                            else [names[ref()] for ref in obs._fusions.values()]
+                        ),
                     }
         return result
 
@@ -157,7 +171,7 @@ def instrument(stack, trace, model):
     def finalize(modifier, state, **kwargs):
         result = original_finalize(modifier, state, **kwargs)
         assert not modifier._runtime_smoothing_hooks
-        assert not modifier._calibration.sample_count
+        assert not _mapping_attr(modifier._calibration, "token_count", "sample_count")
         trace.add("sampling", modifier.activation_subsampling_records)
         return result
 
@@ -165,15 +179,23 @@ def instrument(stack, trace, model):
         # Trace CPU buffers only after their producer has finished. Both source
         # snapshots receive the same instrumentation; stress CUDA ordering separately.
         mapping_name = _mapping_attr(mapping, "mapping_name", "name")
-        cache.wait(mapping_name, torch.device("cpu"))
+        _mapping_attr(cache, "wait_for_capture", "wait")(
+            mapping_name, torch.device("cpu")
+        )
         trace.add("mapping", mapping_name)
         trace.add(
             "statistics",
             {
-                "count": cache.sample_count[mapping_name],
-                "inputs": cache.inputs.get(mapping_name),
+                "count": _mapping_attr(cache, "token_count", "sample_count")[
+                    mapping_name
+                ],
+                "inputs": _mapping_attr(cache, "cached_activations", "inputs").get(
+                    mapping_name
+                ),
                 "hessian": cache.hessian.get(mapping_name),
-                "energy": cache.sigma_x_squared.get(mapping_name),
+                "energy": _mapping_attr(
+                    cache, "sigma_x_squared_sum", "sigma_x_squared"
+                ).get(mapping_name),
             },
         )
         trace.add("observers_before", observers(mapping))
@@ -185,8 +207,8 @@ def instrument(stack, trace, model):
     def optimizer(parameters, evaluate, **kwargs):
         trace.add("initial_log_scales", parameters)
 
-        def loss():
-            value = evaluate()
+        def loss(*args):
+            value = evaluate(*args)
             trace.add("loss", value)
             return value
 
@@ -230,8 +252,8 @@ def instrument(stack, trace, model):
         ("on_finalize", finalize),
     ):
         stack.enter_context(patch.object(base.OSFP4Modifier, method, replacement))
-    stack.enter_context(patch.object(base, "quantize_mapping", quantize))
-    stack.enter_context(patch.object(observer, "run_optimizer", optimizer))
+    stack.enter_context(patch.object(base, quantize_name, quantize))
+    stack.enter_context(patch.object(observer, optimizer_name, optimizer))
     for method in ("optimize_rtn", "optimize_sic"):
         original = getattr(osfp4_quantize, method)
         stack.enter_context(
@@ -316,6 +338,7 @@ def run_case(
             with torch.no_grad():
                 for batch in batches:
                     model(**{key: value.to(device) for key, value in batch.items()})
+            modifier.on_sequential_epoch_end(state, Event(), list(model.modules()))
             modifier.on_calibration_end(state, Event())
             modifier.on_finalize(state)
         else:
@@ -449,8 +472,8 @@ def main():
         return
     for label in ("reference", "candidate"):
         source = getattr(args, label)
-        if source is None or not (source / "llmcompressor").is_dir():
-            parser.error(f"--{label} must contain llmcompressor")
+        if source is None or not (source / "llmcompressor_osfp4").is_dir():
+            parser.error(f"--{label} must contain llmcompressor_osfp4")
     args.output.mkdir(parents=True, exist_ok=False)
     labels = (
         ("reference", "repeat", "candidate")
@@ -510,9 +533,9 @@ def main():
 
                 stable = digest(path) == digest(repeated / path.name)
                 if stable:
-                    assert digest(path) == digest(
-                        candidate / path.name
-                    ), f"{name}: checkpoint file bytes differ"
+                    assert digest(path) == digest(candidate / path.name), (
+                        f"{name}: checkpoint file bytes differ"
+                    )
                 file_report[f"{name}/{path.name}"] = {
                     "baseline_file_byte_stable": stable,
                     "tensor_payloads_must_match": True,

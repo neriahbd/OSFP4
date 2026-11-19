@@ -20,7 +20,6 @@ def test_loss_forward_and_gradients_match_direct_formula():
         weight,
         activations,
         weight_metric=sigma_x_squared,
-        activation_reference=weight,
     )
     alpha = (torch.rand(2, 16, generator=generator) + 0.5).requires_grad_(True)
     gamma_w = (torch.rand(2, 3, 1, generator=generator) + 0.5).requires_grad_(True)
@@ -67,7 +66,6 @@ def test_separated_losses_are_bit_identical_to_joint_loss_and_gradients():
         weight,
         activations,
         weight_metric=metric,
-        activation_reference=weight,
     )
     weight_coefficients = loss.build_weight_loss_coefficients(
         weight,
@@ -75,7 +73,7 @@ def test_separated_losses_are_bit_identical_to_joint_loss_and_gradients():
     )
     activation_coefficients = loss.build_activation_loss_coefficients(
         activations,
-        activation_reference=weight,
+        W_blocks=weight,
     )
     assert torch.equal(joint_coefficients.coeff_w, weight_coefficients)
     assert torch.equal(joint_coefficients.coeff_x, activation_coefficients)
@@ -107,7 +105,7 @@ def test_separated_losses_are_bit_identical_to_joint_loss_and_gradients():
         split_parameters[0],
         split_parameters[2],
         activation_coefficients,
-        row_count=weight.shape[1],
+        m=weight.shape[1],
     )
     assert torch.equal(joint, split)
     joint_gradients = torch.autograd.grad(joint.sum(), joint_parameters)
@@ -125,7 +123,6 @@ def test_rtn_weight_and_activation_losses_use_the_same_normalization():
         weight,
         activations,
         weight_metric=sigma_x_squared,
-        activation_reference=weight,
     )
     alpha = torch.ones(2, 16)
     gamma_w = torch.ones(2, 7, 1)
@@ -142,7 +139,7 @@ def test_rtn_weight_and_activation_losses_use_the_same_normalization():
         alpha,
         gamma_x,
         coefficients.coeff_x,
-        row_count=weight.shape[1],
+        m=weight.shape[1],
     )
 
     torch.testing.assert_close(loss_w, loss_x)
@@ -163,7 +160,7 @@ def test_weight_loss_synthetic_values_equal_phi4_comparator_on_lut_plateau():
         weight_target,
         alpha=torch.ones(1, 16),
         gamma_w=torch.ones(1, 1, 1),
-        coefficients=coefficients,
+        coeff_w=coefficients,
     )
     phi4 = phi_lut(torch.tensor(4.0))
     phi4_lower_bound = values.square().sum() * phi4

@@ -15,7 +15,8 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 "$PUBLIC_PY" -c 'import torch; assert torch.cuda.is_available(), "CUDA required in public calibration environment"'
 "$REF_PY" -c 'import torch; assert torch.cuda.is_available(), "CUDA required in reference calibration environment"'
-"$PUBLIC_PY" -m pytest -q "$suite/../observers/test_chunked_scale_optimization.py"
+"$PUBLIC_PY" -m pytest -q "$suite/../observers/test_chunked_scale_optimization.py" \
+    "$suite/../modifiers/test_memory_and_cuda.py"
 
 capture() {
     local py=$1 implementation=$2 name=$3

@@ -9,13 +9,13 @@ from llmcompressor.core import Event, State
 from llmcompressor_osfp4.modifiers import OSFP4Modifier
 from llmcompressor_osfp4.modifiers.base import OSFP4Mapping
 from llmcompressor_osfp4.modifiers.calibration_cache import OSFP4CalibrationCache
-from llmcompressor_osfp4.modifiers.osfp4_quantize import quantize_mapping
+from llmcompressor_osfp4.modifiers.deployment import prepare_mapping_deployment
 
 from ._testing import LlamaForCausalLM, run_modifier
 
 
 def test_quantize_mapping_signature_has_no_optimizer_or_batch_controls():
-    parameters = inspect.signature(quantize_mapping).parameters
+    parameters = inspect.signature(prepare_mapping_deployment).parameters
 
     assert "steps" not in parameters
     assert "lr" not in parameters
@@ -62,8 +62,8 @@ def test_quantize_mapping_reuses_attached_observer(
         balance_layers=(layer,),
     )
     result = SimpleNamespace(
-        alpha_star=torch.ones(16),
-        gamma_w_star=torch.ones(2, 1),
+        alpha=torch.ones(16),
+        gamma_w_final=torch.ones(2, 1),
         weight_zero_point=torch.zeros(2, 1),
         quantized_weight=torch.zeros(2, 16),
     )
@@ -81,10 +81,10 @@ def test_quantize_mapping_reuses_attached_observer(
         optimize,
     )
     cache = OSFP4CalibrationCache(
-        inputs={} if weight_only else {"mapping": [torch.ones(4, 16)]},
+        cached_activations={} if weight_only else {"mapping": [torch.ones(4, 16)]},
         hessian={"mapping": torch.eye(16)},
-        sigma_x_squared={"mapping": torch.arange(1, 17, dtype=torch.float32)},
-        sample_count={"mapping": 4},
+        sigma_x_squared_sum={"mapping": torch.arange(1, 17, dtype=torch.float32)},
+        token_count={"mapping": 4},
     )
     original_cat = torch.cat
 
@@ -98,10 +98,10 @@ def test_quantize_mapping_reuses_attached_observer(
         events.append("wait")
 
     monkeypatch.setattr(torch, "cat", cat)
-    monkeypatch.setattr(cache, "wait", wait)
+    monkeypatch.setattr(cache, "wait_for_capture", wait)
     sampled = (torch.full((2, 16), 2.0),) if activation_policy == "sampled" else None
 
-    deployment = quantize_mapping(
+    deployment = prepare_mapping_deployment(
         mapping,
         cache,
         mode=mode,
@@ -112,7 +112,7 @@ def test_quantize_mapping_reuses_attached_observer(
 
     assert events[:3] == ["cat", "wait", "optimize"]
     assert _tensor_bytes(seen["args"][0]) == _tensor_bytes(original_weight)
-    expected_batches = sampled if sampled is not None else cache.inputs.get("mapping")
+    expected_batches = sampled if sampled is not None else cache.cached_activations.get("mapping")
     assert seen["args"][1] is expected_batches
     assert seen["kwargs"]["observer"] is attached_observer
     assert seen["kwargs"]["alpha_dtype"] is (torch.bfloat16 if runtime else dtype)
@@ -134,7 +134,7 @@ def test_quantize_mapping_reuses_attached_observer(
     if offloaded:
         assert isinstance(layer._parameters, OffloadCache)
     assert torch.equal(
-        qparams["weight_scale"], result.gamma_w_star.to(layer.weight_scale)
+        qparams["weight_scale"], result.gamma_w_final.to(layer.weight_scale)
     )
     assert torch.equal(
         qparams["weight_zero_point"],
@@ -186,7 +186,7 @@ def test_optimization_only_uses_sampled_activations(monkeypatch, mode):
 
 @pytest.mark.parametrize("mode", ["rtn", "sic"])
 def test_quantize_mapping_returns_fused_row_slices(monkeypatch, mode):
-    from llmcompressor_osfp4.modifiers import osfp4_quantize
+    from llmcompressor_osfp4.modifiers import deployment as deploy, osfp4_quantize
 
     layers = (torch.nn.Linear(16, 3), torch.nn.Linear(16, 2))
     model = torch.nn.Module()
@@ -204,8 +204,8 @@ def test_quantize_mapping_returns_fused_row_slices(monkeypatch, mode):
     weight_zero_point = torch.arange(5, dtype=torch.float32).reshape(5, 1)
     quantized_weight = torch.arange(80, dtype=torch.float32).reshape(5, 16)
     result = SimpleNamespace(
-        alpha_star=torch.ones(16),
-        gamma_w_star=weight_scale,
+        alpha=torch.ones(16),
+        gamma_w_final=weight_scale,
         weight_zero_point=weight_zero_point,
         quantized_weight=quantized_weight,
     )
@@ -215,23 +215,23 @@ def test_quantize_mapping_returns_fused_row_slices(monkeypatch, mode):
         lambda *_args, **_kwargs: result,
     )
     monkeypatch.setattr(
-        osfp4_quantize,
+        deploy,
         "deploy_mapping_smooth_quant_scale",
         lambda _mapping, scale: scale,
     )
     monkeypatch.setattr(
-        osfp4_quantize,
-        "_update_smoothed_input_global_scale",
+        deploy,
+        "update_smoothed_input_global_scale",
         lambda *_args: None,
     )
     cache = OSFP4CalibrationCache(
-        inputs={"mapping": [torch.ones(1, 16)]},
+        cached_activations={"mapping": [torch.ones(1, 16)]},
         hessian={"mapping": torch.eye(16)},
-        sigma_x_squared={"mapping": torch.ones(16)},
-        sample_count={"mapping": 1},
+        sigma_x_squared_sum={"mapping": torch.ones(16)},
+        token_count={"mapping": 1},
     )
 
-    deployment = quantize_mapping(
+    deployment = prepare_mapping_deployment(
         mapping,
         cache,
         mode=mode,
@@ -278,7 +278,7 @@ class RecordingInputObserver(torch.nn.Module):
     "missing_statistics", [(), ("min_vals",), ("max_vals",), ("min_vals", "max_vals")]
 )
 def test_smoothed_input_replay_updates_every_target(monkeypatch, missing_statistics):
-    from llmcompressor_osfp4.modifiers import osfp4_quantize
+    from llmcompressor_osfp4.modifiers import smoothing
 
     layers = (torch.nn.Linear(4, 3), torch.nn.Linear(4, 2))
     observers = (RecordingInputObserver(), RecordingInputObserver())
@@ -293,7 +293,7 @@ def test_smoothed_input_replay_updates_every_target(monkeypatch, missing_statist
     scale = torch.tensor([0.5, 1.0, 1.5, 2.0])
     updates = []
     monkeypatch.setattr(
-        osfp4_quantize,
+        smoothing,
         "update_qparams",
         lambda modules, base_name: updates.append((modules, base_name)),
     )
@@ -305,7 +305,8 @@ def test_smoothed_input_replay_updates_every_target(monkeypatch, missing_statist
         )
         for index, observer in enumerate(observers)
     ]
-    osfp4_quantize._update_smoothed_input_global_scale(layers, batches, scale)
+    cache = OSFP4CalibrationCache(cached_activations={"mapping": list(batches)})
+    smoothing.update_smoothed_input_global_scale(OSFP4Mapping("mapping", None, layers), cache, scale)
     for handle in handles:
         handle.remove()
 
@@ -353,7 +354,7 @@ def test_invalid_optimized_scales_fail_before_weight_smoothing(monkeypatch):
     assert torch.equal(mapping.smooth_layer.weight, smooth_layer_weight)
     for layer, expected in zip(mapping.balance_layers, balance_weights):
         assert torch.equal(layer.weight, expected)
-    assert mapping.mapping_name in modifier._calibration.inputs
+    assert mapping.mapping_name in modifier._calibration.cached_activations
 
 
 @pytest.mark.parametrize("mode", ["rtn", "sic"])
@@ -365,7 +366,7 @@ def test_weight_only_uses_statistics_without_activation_replay(monkeypatch, mode
     )
 
     assert modifier.activation_subsample_size is None
-    assert not modifier._calibration.inputs
+    assert not modifier._calibration.cached_activations
     for layer in model.modules():
         if hasattr(layer, "weight_scale"):
             assert not hasattr(layer, "input_global_scale")

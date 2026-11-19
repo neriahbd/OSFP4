@@ -53,10 +53,10 @@ def test_rtn_releases_activation_groups_before_scale_selection():
 
     class Observer:
         def optimize_quantization_group_scales(
-            self, weight, *, activation_quantization_groups, **kwargs
+            self, weight, *, X_blocks, **kwargs
         ):
-            activation_reference.append(weakref.ref(activation_quantization_groups))
-            return SimpleNamespace(alpha_star=torch.ones(weight.shape[0], 16))
+            activation_reference.append(weakref.ref(X_blocks))
+            return SimpleNamespace(alpha=torch.ones(weight.shape[0], 16))
 
         def select_weight_qparams(self, weight, optimized, *, weight_metric):
             gc.collect()
@@ -86,13 +86,13 @@ def test_sic_releases_hessian_clone_and_weight_groups_before_scale_selection(
 
     class Observer:
         def optimize_quantization_group_scales(
-            self, weight, *, activation_quantization_groups, **kwargs
+            self, weight, *, X_blocks, **kwargs
         ):
             gc.collect()
             assert hessian_reference[0]() is None
             weight_reference.append(weakref.ref(weight))
             return SimpleNamespace(
-                alpha_star=torch.ones(weight.shape[0], 16),
+                alpha=torch.ones(weight.shape[0], 16),
                 gamma_w=torch.ones(weight.shape[0], weight.shape[1], 1),
             )
 
@@ -164,9 +164,8 @@ def test_multiple_cuda_captures_match_ordered_reference(
     cache = OSFP4CalibrationCache(offload_hessians=offload)
     capture = cache.make_capture_hook(
         "mapping",
-        capture_hessian=mode == "sic",
-        capture_sigma_x_squared=mode == "rtn",
-        cache_inputs=cache_inputs,
+        optimization_mode=mode,
+        cache_activations=cache_inputs,
     )
     batches = [
         torch.randn(n, 3, 32 if noncontiguous else 16, device="cuda", dtype=dtype)
@@ -181,25 +180,25 @@ def test_multiple_cuda_captures_match_ordered_reference(
         expected_hessian.addmm_(flat.T, flat)
         expected_energy.add_(flat.square().sum(0))
         capture(layer, (batch,))
-        assert len(cache.events["mapping"]) == 1
+        assert len(cache.capture_events["mapping"]) == 1
     consumer = torch.cuda.Stream()
     with torch.cuda.stream(consumer):
-        cache.wait("mapping", torch.device("cuda"))
+        cache.wait_for_capture("mapping", torch.device("cuda"))
         actual = (
             cache.hessian["mapping"].to("cuda")
             if mode == "sic"
-            else cache.sigma_x_squared["mapping"]
+            else cache.sigma_x_squared_sum["mapping"]
         ).clone()
     consumer.synchronize()
     assert_bytes(actual, expected_hessian if mode == "sic" else expected_energy)
-    cache.wait("mapping", torch.device("cpu"))
+    cache.wait_for_capture("mapping", torch.device("cpu"))
     if cache_inputs:
-        for cached, batch in zip(cache.inputs["mapping"], batches):
+        for cached, batch in zip(cache.cached_activations["mapping"], batches):
             assert cached.is_pinned()
             assert_bytes(cached, batch.reshape(-1, 16))
     else:
-        assert not cache.inputs
+        assert not cache.cached_activations
     if mode == "sic":
         assert cache.hessian["mapping"].device.type == ("cpu" if offload else "cuda")
     cache.clear_mapping("mapping")
-    assert not cache.events
+    assert not cache.capture_events

@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 import torch
 
-from compare_base import Trace, compare
+from compare_base import Trace, _mapping_attr, compare
 
 
 def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False):
@@ -42,7 +42,7 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
     from llmcompressor.transformers.compression.compressed_tensors_utils import (
         modify_save_pretrained,
     )
-    from llmcompressor_osfp4.modifiers import OSFP4Modifier
+    from llmcompressor_osfp4.modifiers import OSFP4Modifier, base
 
     torch.manual_seed(42)
     config = LlamaConfig(
@@ -79,9 +79,17 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
     original_sample = OSFP4Modifier._sample_optimization_inputs
 
     def sample(self, mapping):
-        assert (mapping.mapping_name in self._calibration.sample_indices) == streaming
+        assert (
+            mapping.mapping_name
+            in _mapping_attr(self._calibration, "sampled_indices", "sample_indices")
+        ) == streaming
         selected = original_sample(self, mapping)
-        actual = torch.cat(selected or self._calibration.inputs[mapping.mapping_name])
+        actual = torch.cat(
+            selected
+            or _mapping_attr(self._calibration, "cached_activations", "inputs")[
+                mapping.mapping_name
+            ]
+        )
         record = self.activation_subsampling_records[mapping.mapping_name]
         n = mapping.balance_layers[0].weight.shape[1]
         assert record["k1"] == rows
@@ -99,7 +107,9 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
         else:
             trace.add(
                 f"energy/{mapping.mapping_name}",
-                self._calibration.sigma_x_squared[mapping.mapping_name],
+                _mapping_attr(
+                    self._calibration, "sigma_x_squared_sum", "sigma_x_squared"
+                )[mapping.mapping_name],
             )
         return selected
 
@@ -110,7 +120,12 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
         if not streaming:
             stack.enter_context(
                 patch.object(
-                    OSFP4Modifier, "_calibration_token_count", return_value=None
+                    *(
+                        (base, "count_calibration_tokens")
+                        if hasattr(base, "count_calibration_tokens")
+                        else (OSFP4Modifier, "_calibration_token_count")
+                    ),
+                    return_value=None,
                 )
             )
         stack.enter_context(
@@ -139,8 +154,12 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
     directory.mkdir(parents=True)
     (directory / "provenance.json").write_text(json.dumps(records, indent=2) + "\n")
     comparable_records = {name: record.copy() for name, record in records.items()}
-    if single_width and cap == "auto":
-        for record in comparable_records.values():
+    for record in comparable_records.values():
+        if "activation_subsample_size" in record:
+            assert record.pop("activation_subsample_size") == (
+                2 * record["n"] if cap == "auto" else cap
+            )
+        if single_width and cap == "auto":
             del record["n"]
             record["policy"] = "fixed"
     trace.add("provenance", comparable_records)

@@ -5,7 +5,7 @@ import torch
 
 from llmcompressor_osfp4.modifiers import optimization
 from llmcompressor_osfp4.observers import scale_selection
-from llmcompressor_osfp4.observers.fp4 import (
+from tests.observers._fp4_reference import (
     quantize_e2m1,
 )
 
