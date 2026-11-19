@@ -23,7 +23,7 @@ To check every production Python file in the public calibration package against 
 python3 tests/parity/check_source.py /path/to/llm-compressor-for-osfp4
 ```
 
-The checker compares shared modules byte for byte after translating package imports. In the adapted modifier and smoothing modules it checks shared field names, method signatures, and the bodies of shared calibration methods. It also checks for unexpected public files.
+The checker compares the shared Python files as raw bytes, including imports and whitespace. For `base.py` and `smoothing.py`, it compares the complete diff to [smooth-scale.patch](smooth-scale.patch), which records the public runtime-scale hooks and checkpoint handling. It also verifies the package file list.
 
 The tensor comparison covers a two-layer Qwen3 model with grouped attention in
 NVFP4 and NVFP4A16, each with RTN and SIC. It checks the input state, sampled

@@ -12,7 +12,7 @@ import torch
 from ._activation_groups import assemble_activation_quantization_groups
 
 if TYPE_CHECKING:
-    from llmcompressor_osfp4.observers import OSFP4Observer
+    from llmcompressor.observers.osfp4 import OSFP4Observer
 
 __all__ = [
     "RTNQuantizationResult",

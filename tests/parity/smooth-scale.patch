@@ -1,0 +1,107 @@
+--- a/modifiers/base.py
++++ b/modifiers/base.py
+@@ -24,0 +25 @@
++from torch.utils.hooks import RemovableHandle
+@@ -49 +50 @@
+-from .transforms import initialize_diagonal_smoothing
++from .runtime_contract import attach_osfp4_runtime_contract
+@@ -81,3 +82,2 @@
+-           Validate the setup, resolve smooth-layer and runtime mappings,
+-           attach permanent input transforms where needed, and initialize
+-           quantization.
++           Validate the setup, resolve smooth-layer and runtime mappings, and
++           initialize quantization.
+@@ -101 +101 @@
+-           mapping references. Keep deployed weights and input transforms.
++           mapping references, remove temporary hooks, and attach plugin metadata.
+@@ -113,3 +113,2 @@
+-    preceding smooth layer's parameters or through a permanent runtime input
+-    transform. The updated parameters and runtime transforms remain in the
+-    model for inference and checkpoint export.
++    preceding smooth layer's parameters or by a temporary input hook during
++    calibration. The checkpoint stores the runtime scale for the vLLM plugin.
+@@ -138,0 +138,4 @@
++
++    _runtime_smoothing_hooks: dict[Module, RemovableHandle] = PrivateAttr(
++        default_factory=dict
++    )
+@@ -207,2 +210 @@
+-        """Validate the setup, resolve mappings, reset capture state, attach runtime
+-        transforms, and initialize quantization.
++        """Validate the setup, resolve mappings, reset capture state and initialize quantization.
+@@ -218,8 +219,0 @@
+-        initialize_diagonal_smoothing(
+-            state.model,
+-            [
+-                mapping.mapping_name
+-                for mapping in self._resolved_mappings
+-                if mapping.requires_runtime_smoothing
+-            ],
+-        )
+@@ -359,0 +354 @@
++        self._remove_runtime_smoothing_hooks()
+@@ -579,0 +575 @@
++            self._register_runtime_smoothing_hook(mapping)
+@@ -583,0 +580,20 @@
++
++    def _register_runtime_smoothing_hook(self, mapping: OSFP4Mapping) -> None:
++        """Temporarily apply a runtime SmoothQuant scale during local execution."""
++        if not mapping.requires_runtime_smoothing:
++            return
++        layer = mapping.balance_layers[0]
++        if layer in self._runtime_smoothing_hooks:
++            return
++
++        def scale_input(module: Module, args: tuple):
++            """Multiply a layer input by its deployed runtime smoothing scale."""
++            scale = module.smooth_quant_scale.to(
++                device=args[0].device,
++                dtype=args[0].dtype,
++            )
++            return args[0] * scale, *args[1:]
++
++        self._runtime_smoothing_hooks[layer] = layer.register_forward_pre_hook(
++            scale_input
++        )
+@@ -611,0 +628,10 @@
++        runtime_targets = [
++            mapping.mapping_name
++            for mapping in self._resolved_mappings
++            if mapping.requires_runtime_smoothing
++        ]
++        attach_osfp4_runtime_contract(
++            state.model,
++            runtime_smooth_quant_scale_targets=runtime_targets,
++        )
++        self._remove_runtime_smoothing_hooks()
+@@ -615,0 +642,6 @@
++
++    def _remove_runtime_smoothing_hooks(self) -> None:
++        """Remove runtime scale hooks without removing checkpoint state."""
++        for handle in self._runtime_smoothing_hooks.values():
++            handle.remove()
++        self._runtime_smoothing_hooks.clear()
+--- a/modifiers/smoothing.py
++++ b/modifiers/smoothing.py
+@@ -10 +10 @@
+-from torch.nn import Linear, Module
++from torch.nn import Linear, Module, Parameter
+@@ -15 +14,0 @@
+-from .transforms import TRANSFORM_MODULE
+@@ -67 +66,4 @@
+-    """Store the BF16 scale in smooth_quant_input.weight and return its FP32 values."""
++    """Store the BF16 scale in smooth_quant_scale and return its FP32 values."""
++    if "smooth_quant_scale" in layer._parameters:
++        raise RuntimeError("smooth_quant_scale is already registered on balance layer")
++
+@@ -69,2 +70,0 @@
+-    transform = getattr(layer, TRANSFORM_MODULE)
+-    transform.set_scale(deployed_scale)
+@@ -75 +75,6 @@
+-    return transform.weight.detach().float()
++    deployed_scale = Parameter(
++        deployed_scale.to(device=layer.weight.device),
++        requires_grad=False,
++    )
++    layer.register_parameter("smooth_quant_scale", deployed_scale)
++    return deployed_scale.detach().float()

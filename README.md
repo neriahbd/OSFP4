@@ -112,10 +112,10 @@ activation statistics still use all calibration rows.
 | --- | --- | --- |
 | `config_groups` | `None` | Explicit quantization scheme groups and targets, instead of `scheme`. |
 | `kv_cache_scheme` | `None` | KV-cache quantization configuration. |
-| `weight_observer` | `None` | OSFP4 sets the weight observer to `"osfp4"` during configuration. |
+| `weight_observer` | `None` | Each resolved weight scheme uses the `"osfp4"` observer. |
 | `input_observer` | `None` | Override the input activation observer. |
 | `output_observer` | `None` | Override the output activation observer. |
-| `observer` | `None` | Observer dictionary with `weights`, `input`, and `output` keys; alternative to individual observer fields. OSFP4 sets the weight observer. |
+| `observer` | `None` | Observer dictionary with `weights`, `input`, and `output` keys; alternative to individual observer fields. OSFP4 selects the observer for each resolved weight scheme. |
 | `bypass_divisibility_checks` | `False` | Skip LLM Compressor's group-size checks; OSFP4 still requires widths divisible by 16. |
 | `requires_calibration_data` | `True` | Calibration requirement flag; keep `True` for OSFP4. |
 | `index` | `None` | Modifier ordering metadata. |

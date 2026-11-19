@@ -16,7 +16,7 @@ def test_optimization_mode_configures_one_observer(mode):
     scheme = modifier.resolved_config.config_groups["group_0"]
     weights = scheme.weights
 
-    assert modifier.weight_observer == "osfp4"
+    assert modifier.weight_observer is None
     assert weights.observer == "osfp4"
     assert weights.observer_kwargs == {
         "mode": mode,
@@ -229,7 +229,7 @@ def test_modifier_overrides_requested_weight_observer():
     modifier = _OSFP4Modifier(scheme="NVFP4", weight_observer="memoryless_minmax")
     weights = modifier.resolved_config.config_groups["group_0"].weights
 
-    assert modifier.weight_observer == "osfp4"
+    assert modifier.weight_observer == "memoryless_minmax"
     assert weights.observer == "osfp4"
 
 
@@ -244,7 +244,7 @@ def test_public_configuration_defaults_are_canonical():
     assert modifier.activation_subsample_size == "auto"
     assert modifier.targets == ["Linear"]
     assert modifier.ignore == []
-    assert modifier.weight_observer == "osfp4"
+    assert modifier.weight_observer is None
     assert "resolved_mappings_" not in modifier.model_dump()
     assert "activation_subsample_seed" not in modifier.model_dump()
     assert "_resolved_mappings" not in modifier.model_dump()
@@ -317,14 +317,10 @@ def test_modifier_rejects_removed_weight_scale_mode_parameter():
 
 @pytest.mark.parametrize("field", ["start", "end"])
 @pytest.mark.parametrize("value", [None, -1, 0, -2, 1])
-def test_one_shot_schedule_preserves_accepted_values(field, value):
+def test_initialize_delegates_schedule_to_modifier_lifecycle(field, value):
     modifier = make_osfp4_modifier(**{field: value})
     state = State(model=LlamaForCausalLM())
-    if value in (None, -1, 0):
-        assert modifier.on_initialize(state)
-    else:
-        with pytest.raises(ValueError, match="one-shot"):
-            modifier.on_initialize(state)
+    assert modifier.on_initialize(state)
 
 
 def test_resolved_groups_have_independent_optimizer_settings():

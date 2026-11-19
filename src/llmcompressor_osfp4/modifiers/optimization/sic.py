@@ -11,12 +11,12 @@ import torch
 from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA
 from torch.nn import Linear
 
-from llmcompressor_osfp4.observers import OptimizedQuantizationGroupScales
+from llmcompressor.observers.osfp4 import OptimizedQuantizationGroupScales
 
 from ._activation_groups import assemble_activation_quantization_groups
 
 if TYPE_CHECKING:
-    from llmcompressor_osfp4.observers import OSFP4Observer
+    from llmcompressor.observers.osfp4 import OSFP4Observer
 
 __all__ = [
     "SICQuantizationResult",

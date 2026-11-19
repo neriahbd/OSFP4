@@ -191,7 +191,6 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         if len(weight_only_groups) > 1:
             raise ValueError("OSFP4 cannot mix NVFP4 and NVFP4A16 config groups")
         self._weight_only = next(iter(weight_only_groups), False)
-        self.weight_observer = _OSFP4_OBSERVER
         if self._weight_only:
             self.activation_subsample_size = None
         return config
@@ -213,21 +212,18 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         self._raise_if_deployment_failed()
         self._validate_initialization(state, **kwargs)
 
-        resolved_mappings = self._resolve_mappings(state.model)
-        QuantizationMixin.initialize_quantization(self, state.model)
-        self._resolved_mappings = resolved_mappings
+        self._resolved_mappings = self._resolve_mappings(state.model)
         self._reset_calibration_state()
         # State may contain a deep copy; count the loader the pipeline will consume.
         self._calibration_dataloader = kwargs.get("calib_data", state.data.calib)
         self._calibration_cache.offload_hessians = self.offload_hessians
+        QuantizationMixin.initialize_quantization(self, state.model)
         return True
 
     def _validate_initialization(self, state: State, **kwargs) -> None:
         """Reject unsupported execution, recipe, and model configurations before
         modifying the model.
         """
-        if self.start not in (None, -1, 0) or self.end not in (None, -1, 0):
-            raise ValueError("OSFP4 requires a one-shot schedule")
         if is_distributed():
             raise NotImplementedError("OSFP4 calibration is single-process")
         pipeline = kwargs.get("pipeline")
@@ -275,7 +271,7 @@ class OSFP4Modifier(Modifier, QuantizationMixin):
         selected = list(
             match_named_modules(model, self.resolved_weight_targets, self.ignore)
         )
-        if not selected and self.resolved_weight_targets:
+        if not selected:
             raise ValueError("No Linear modules matched the OSFP4 targets")
         if any(
             not isinstance(layer, Linear) or layer.in_features % 16

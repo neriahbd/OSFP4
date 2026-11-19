@@ -36,10 +36,16 @@ def _assert_unchanged(model, expected):
         assert torch.equal(data, old_data), name
 
 
+def test_empty_targets_fail_before_calibration():
+    modifier = make_osfp4_modifier(targets=[])
+    with pytest.raises(ValueError, match="No Linear modules matched"):
+        modifier.on_initialize(State(model=LlamaForCausalLM()))
+
+
 @pytest.mark.parametrize("mode", ["rtn", "sic"])
 @pytest.mark.parametrize("scheme", ["NVFP4", "NVFP4A16"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("selection", ["runtime", "norm", "empty"])
+@pytest.mark.parametrize("selection", ["runtime", "norm"])
 def test_repeated_finalize_is_a_byte_exact_noop(
     monkeypatch, mode, scheme, dtype, selection
 ):
@@ -48,7 +54,6 @@ def test_repeated_finalize_is_a_byte_exact_noop(
     targets = {
         "runtime": ["Linear"],
         "norm": ["re:.*[qkv]_proj"],
-        "empty": [],
     }[selection]
     modifier = make_osfp4_modifier(
         optimization_mode=mode, scheme=scheme, steps=1, targets=targets
@@ -168,7 +173,7 @@ def test_successful_direct_initialize_resets_completion():
         modifier.on_finalize(state)
 
 
-def test_failed_initialization_does_not_reset_completion():
+def test_new_initialization_resets_completion_before_quantization():
     model, modifier = run_modifier(optimization_mode="rtn")
     modifier.on_finalize(State(model=model))
     with patch.object(
@@ -178,7 +183,7 @@ def test_failed_initialization_does_not_reset_completion():
     ):
         with pytest.raises(RuntimeError, match="initialization failed"):
             modifier.on_initialize(State(model=LlamaForCausalLM()))
-    assert modifier._finalization_complete
+    assert not modifier._finalization_complete
 
 
 @pytest.mark.parametrize("mode", ["rtn", "sic"])
