@@ -23,12 +23,12 @@ def test_only_sic_captures_mapping_hessians(mode, captures_hessian):
     modifier.on_calibration_start(state, Event())
     model(torch.randn(2, 3, 16))
 
-    assert modifier._calibration.cached_activations
+    assert modifier._calibration_cache.cached_activations
     for mapping in modifier._resolved_mappings:
         assert (
-            mapping.mapping_name in modifier._calibration.hessian
+            mapping.mapping_name in modifier._calibration_cache.hessian
         ) is captures_hessian
-        assert (mapping.mapping_name in modifier._calibration.sigma_x_squared_sum) is (
+        assert (mapping.mapping_name in modifier._calibration_cache.sigma_x_squared_sum) is (
             mode == "rtn"
         )
 
@@ -48,19 +48,19 @@ def test_nvfp4a16_captures_only_required_statistics(mode):
     modifier.on_calibration_start(state, Event())
     model(torch.randn(2, 3, 16))
 
-    assert not modifier._calibration.cached_activations
-    assert set(modifier._calibration.token_count) == {
+    assert not modifier._calibration_cache.cached_activations
+    assert set(modifier._calibration_cache.token_count) == {
         mapping.mapping_name for mapping in modifier._resolved_mappings
     }
     if mode == "sic":
-        assert not modifier._calibration.sigma_x_squared_sum
-        assert set(modifier._calibration.hessian) == set(
-            modifier._calibration.token_count
+        assert not modifier._calibration_cache.sigma_x_squared_sum
+        assert set(modifier._calibration_cache.hessian) == set(
+            modifier._calibration_cache.token_count
         )
     else:
-        assert not modifier._calibration.hessian
-        assert set(modifier._calibration.sigma_x_squared_sum) == set(
-            modifier._calibration.token_count
+        assert not modifier._calibration_cache.hessian
+        assert set(modifier._calibration_cache.sigma_x_squared_sum) == set(
+            modifier._calibration_cache.token_count
         )
     modifier.remove_hooks()
 
@@ -243,22 +243,22 @@ def test_cuda_capture_uses_pinned_buffers_events_and_device_statistics(
     model(torch.randn(2, 3, 16, device="cuda"))
 
     for mapping in modifier._resolved_mappings:
-        cached = modifier._calibration.cached_activations[mapping.mapping_name]
-        events = modifier._calibration.capture_events[mapping.mapping_name]
+        cached = modifier._calibration_cache.cached_activations[mapping.mapping_name]
+        events = modifier._calibration_cache.capture_events[mapping.mapping_name]
         assert cached and len(events) == 1
         assert all(value.device.type == "cpu" and value.is_pinned() for value in cached)
         assert all(event is not None for event in events.values())
-        assert not hasattr(modifier._calibration, "channel_absmax")
+        assert not hasattr(modifier._calibration_cache, "channel_absmax")
         expected_hessian_device = "cpu" if offload_hessians else "cuda"
         assert (
-            modifier._calibration.hessian[mapping.mapping_name].device.type
+            modifier._calibration_cache.hessian[mapping.mapping_name].device.type
             == expected_hessian_device
         )
         full_weight = torch.cat(
             [layer.weight.detach().float() for layer in mapping.balance_layers],
             dim=0,
         )
-        modifier._calibration.wait_for_capture(mapping.mapping_name, full_weight.device)
+        modifier._calibration_cache.wait_for_capture(mapping.mapping_name, full_weight.device)
 
     torch.cuda.synchronize()
     modifier.remove_hooks()
@@ -284,7 +284,7 @@ def test_mapping_cache_is_retained_when_optimization_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="optimization failed"):
         modifier._optimize_mapping(mapping)
 
-    assert mapping.mapping_name in modifier._calibration.cached_activations
+    assert mapping.mapping_name in modifier._calibration_cache.cached_activations
     assert mapping.mapping_name not in modifier._optimized_mapping_names
     assert mapping.balance_layers[0] not in modifier._runtime_smoothing_hooks
 
@@ -309,8 +309,8 @@ def test_nvfp4a16_statistics_are_retained_when_optimization_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="optimization failed"):
         modifier._optimize_mapping(mapping)
 
-    assert mapping.mapping_name in modifier._calibration.sigma_x_squared_sum
-    assert mapping.mapping_name in modifier._calibration.token_count
+    assert mapping.mapping_name in modifier._calibration_cache.sigma_x_squared_sum
+    assert mapping.mapping_name in modifier._calibration_cache.token_count
     assert mapping.mapping_name not in modifier._optimized_mapping_names
     modifier.remove_hooks()
 
@@ -327,19 +327,21 @@ def test_observed_mapping_is_optimized_only_once(monkeypatch):
 
     optimized_names = []
 
-    def record(mapping, *_args, **_kwargs):
-        optimized_names.append(mapping.mapping_name)
-        return []
+    original_quantize = base.quantize_mapping
 
-    monkeypatch.setattr(base, "prepare_mapping_deployment", record)
-    modifier._optimize_available_mappings()
-    modifier._optimize_available_mappings()
+    def record(mapping, *args, **kwargs):
+        optimized_names.append(mapping.mapping_name)
+        return original_quantize(mapping, *args, **kwargs)
+
+    monkeypatch.setattr(base, "quantize_mapping", record)
+    modifier.on_sequential_epoch_end(state, Event(), [])
+    modifier.on_sequential_epoch_end(state, Event(), [])
 
     assert optimized_names == [
         mapping.mapping_name for mapping in modifier._resolved_mappings
     ]
     assert modifier._optimized_mapping_names == set(optimized_names)
-    assert not modifier._calibration.cached_activations
+    assert not modifier._calibration_cache.cached_activations
     modifier.remove_hooks()
 
 
@@ -406,7 +408,7 @@ def test_default_none_and_full_cap_are_bit_exact_when_cap_reaches_k1(mode):
     assert default_modifier.activation_subsampling_records
     assert all(
         record["policy"] == "auto"
-        and record["n"] in (16, 32)
+        and record["activation_subsample_size"] in (32, 64)
         and record["k"] == record["k1"] == 6
         for record in default_modifier.activation_subsampling_records.values()
     )
@@ -454,11 +456,13 @@ def test_optimize_mapping_installs_returned_offloaded_parameters(monkeypatch):
         installed.append((module, name))
         return original_update(module, name, value)
 
-    monkeypatch.setattr(
-        base,
-        "prepare_mapping_deployment",
-        lambda *_args, **_kwargs: [(layer, q_param_dict)],
+    result = base.SICQuantizationResult(
+        layer.smooth_quant_scale, q_param_dict["weight_scale"],
+        q_param_dict["weight_zero_point"], q_param_dict["weight"],
     )
+    monkeypatch.setattr(base, "quantize_mapping", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(base, "deploy_mapping_smooth_quant_scale", lambda _, scale: scale)
+    monkeypatch.setattr(base, "update_smoothed_input_global_scale", lambda *_: None)
     monkeypatch.setattr(base, "update_offload_parameter", record_update)
 
     modifier._optimize_mapping(mapping)
@@ -487,12 +491,14 @@ def test_qparam_install_failure_preserves_mapping_lifecycle_state(monkeypatch):
         balance_layers=(layer,),
     )
     modifier = make_osfp4_modifier(steps=0)
-    modifier._calibration.cached_activations[mapping.mapping_name] = [torch.ones(1, 16)]
-    monkeypatch.setattr(
-        base,
-        "prepare_mapping_deployment",
-        lambda *_args, **_kwargs: [(layer, {"weight": torch.zeros_like(layer.weight)})],
-    )
+    modifier._calibration_cache.cached_activations[mapping.mapping_name] = [torch.ones(1, 16)]
+    layer.register_parameter("weight_scale", torch.nn.Parameter(torch.ones(2, 1)))
+    layer.register_parameter("weight_zero_point", torch.nn.Parameter(torch.zeros(2, 1)))
+    layer.register_parameter("weight_global_scale", torch.nn.Parameter(torch.ones(1)))
+    result = base.RTNQuantizationResult(layer.smooth_quant_scale, layer.weight_scale, layer.weight_zero_point)
+    monkeypatch.setattr(base, "quantize_mapping", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(base, "deploy_mapping_smooth_quant_scale", lambda _, scale: scale)
+    monkeypatch.setattr(base, "update_smoothed_input_global_scale", lambda *_: None)
 
     def fail(*_args, **_kwargs):
         raise RuntimeError("installation failed")
@@ -503,7 +509,7 @@ def test_qparam_install_failure_preserves_mapping_lifecycle_state(monkeypatch):
         modifier._optimize_mapping(mapping)
 
     assert str(raised.value.__cause__) == "installation failed"
-    assert mapping.mapping_name in modifier._calibration.cached_activations
+    assert mapping.mapping_name in modifier._calibration_cache.cached_activations
     assert mapping.mapping_name not in modifier._optimized_mapping_names
     assert layer not in modifier._runtime_smoothing_hooks
 
@@ -561,15 +567,15 @@ def test_sampling_wait_precedes_cpu_gather_and_preserves_none_sentinel(
         calls.append("sample")
         return original_sample(*args, **kwargs)
 
-    def quantize(current, cache, *, optimization_input_batches, **kwargs):
+    def quantize(current, cache, *, sampled_activations, **kwargs):
         calls.append("quantize")
         assert current is mapping
-        assert cache is modifier._calibration
+        assert cache is modifier._calibration_cache
         assert cache.cached_activations[mapping.mapping_name][0].shape == (6, 16)
         if cap == 2:
-            assert optimization_input_batches[0].shape == (2, 16)
+            assert sampled_activations[0].shape == (2, 16)
         else:
-            assert optimization_input_batches is None
+            assert sampled_activations is None
         return []
 
     def clear(cache, name):
@@ -580,7 +586,8 @@ def test_sampling_wait_precedes_cpu_gather_and_preserves_none_sentinel(
     monkeypatch.setattr(OSFP4CalibrationCache, "wait_for_capture", wait)
     monkeypatch.setattr(OSFP4CalibrationCache, "clear_mapping", clear)
     monkeypatch.setattr(base, "subsample_activations", sample)
-    monkeypatch.setattr(base, "prepare_mapping_deployment", quantize)
+    monkeypatch.setattr(base.OSFP4Modifier, "_deploy_mapping", lambda *_: None)
+    monkeypatch.setattr(base, "quantize_mapping", quantize)
     modifier._optimize_mapping(mapping)
     assert calls == ([] if cap is None else ["wait", "sample"]) + ["quantize", "clear"]
     if cap is None:

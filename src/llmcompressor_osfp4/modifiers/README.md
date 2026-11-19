@@ -50,7 +50,7 @@ Auto defines `n = weight.shape[1]` for the mapping's balance layers and retains
 `k = min(total_rows, 2 * n)` complete activation vectors. Shared projections must
 have the same input width; their output widths do not affect the cap. The sample
 is selected once using seed 42 and reused throughout optimization. Sampling
-records include `policy="auto"` and `n`. Explicit integer caps retain the
+records include `policy="auto"` and the resolved `activation_subsample_size`. Explicit integer caps retain the
 existing fixed-policy records and behavior; use `16384` for the previous default.
 
 With activation subsampling enabled, OSFP4 automatically counts token rows in the

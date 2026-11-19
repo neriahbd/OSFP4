@@ -162,7 +162,7 @@ def capture(args):
         def mapping(instance, mapping):
             nonlocal mapping_name
             mapping_name = mapping.mapping_name
-            cache = instance._calibration_cache if reference else instance._calibration
+            cache = instance._calibration_cache
             cache.wait_for_capture(mapping_name, torch.device("cpu"))
             for name, attr in [
                 (

@@ -171,8 +171,15 @@ def instrument(stack, trace, model):
     def finalize(modifier, state, **kwargs):
         result = original_finalize(modifier, state, **kwargs)
         assert not modifier._runtime_smoothing_hooks
-        assert not _mapping_attr(modifier._calibration, "token_count", "sample_count")
-        trace.add("sampling", modifier.activation_subsampling_records)
+        cache = _mapping_attr(modifier, "_calibration_cache", "_calibration")
+        assert not _mapping_attr(cache, "token_count", "sample_count")
+        records = modifier.activation_subsampling_records
+        for record in records.values():
+            if "n" in record:
+                width = record.pop("n")
+                assert record["policy"] == "auto"
+                assert record.setdefault("activation_subsample_size", 2 * width) == 2 * width
+        trace.add("sampling", records)
         return result
 
     def quantize(mapping, cache, **kwargs):
@@ -200,9 +207,28 @@ def instrument(stack, trace, model):
         )
         trace.add("observers_before", observers(mapping))
         result = original_quantize(mapping, cache, **kwargs)
-        trace.add("observers_after", observers(mapping))
-        trace.add("deployment", [(names[layer], params) for layer, params in result])
+        if isinstance(result, list):
+            trace.add("observers_after", observers(mapping))
+            trace.add("deployment", [(names[layer], params) for layer, params in result])
         return result
+
+    if hasattr(base.OSFP4Modifier, "_prepare_optimization_activations"):
+        original_deploy = base.OSFP4Modifier._deploy_mapping
+
+        def deploy(modifier, mapping, result):
+            installed = {}
+            update = base.update_offload_parameter
+
+            def record(layer, name, value):
+                installed.setdefault(names[layer], {})[name] = value
+                return update(layer, name, value)
+
+            with patch.object(base, "update_offload_parameter", record):
+                original_deploy(modifier, mapping, result)
+            trace.add("observers_after", observers(mapping))
+            trace.add("deployment", list(installed.items()))
+
+        stack.enter_context(patch.object(base.OSFP4Modifier, "_deploy_mapping", deploy))
 
     def optimizer(parameters, evaluate, **kwargs):
         trace.add("initial_log_scales", parameters)

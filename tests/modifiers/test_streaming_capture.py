@@ -184,10 +184,10 @@ def test_existing_capture_fallback(fallback):
     modifier.on_calibration_start(state, Event())
     try:
         model(torch.randn(1, 11, 16))
-        assert not modifier._calibration.sampled_indices
-        for batches in modifier._calibration.cached_activations.values():
+        assert not modifier._calibration_cache.sampled_indices
+        for batches in modifier._calibration_cache.cached_activations.values():
             assert sum(batch.shape[0] for batch in batches) == 11
-        assert bool(modifier._calibration.cached_activations) == (fallback != "weight_only")
+        assert bool(modifier._calibration_cache.cached_activations) == (fallback != "weight_only")
     finally:
         modifier.remove_hooks()
 
@@ -244,9 +244,9 @@ def test_pipeline_and_saved_checkpoint_byte_parity(tmp_path, device, dtype, mode
                 )
             capture = stack.enter_context(
                 patch.object(
-                    modifier._calibration,
+                    modifier._calibration_cache,
                     "make_capture_hook",
-                    wraps=modifier._calibration.make_capture_hook,
+                    wraps=modifier._calibration_cache.make_capture_hook,
                 )
             )
             stack.enter_context(
@@ -332,17 +332,17 @@ def test_auto_matches_fixed_twice_input_width_for_streaming_and_fallback(rows, w
                     selected = {}
                     for mapping in modifier._resolved_mappings:
                         n = mapping.balance_layers[0].weight.shape[1]
-                        batches = modifier._sample_optimization_inputs(mapping)
+                        batches = modifier._prepare_optimization_activations(mapping)
                         selected[mapping.mapping_name] = torch.cat(
                             batches
-                            or modifier._calibration.cached_activations[mapping.mapping_name]
+                            or modifier._calibration_cache.cached_activations[mapping.mapping_name]
                         )
                         record = modifier.activation_subsampling_records[
                             mapping.mapping_name
                         ]
                         assert record["k"] == min(rows, 2 * n)
                         if cap == "auto":
-                            assert record["policy"] == "auto" and record["n"] == n
+                            assert record["policy"] == "auto" and record["activation_subsample_size"] == 2 * n
                     records = modifier.activation_subsampling_records
                     snapshots.append((streaming, cap, selected, records))
                 finally:
@@ -356,6 +356,5 @@ def test_auto_matches_fixed_twice_input_width_for_streaming_and_fallback(rows, w
         for name, tensor in auto[2].items():
             assert_bytes(tensor, fixed[2][name], name)
             record = dict(auto[3][name])
-            del record["n"]
             record["policy"] = "fixed"
             assert record == fixed[3][name]

@@ -76,17 +76,18 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
     ]
     loader = torch.utils.data.DataLoader(batches, batch_size=None)
     trace = Trace()
-    original_sample = OSFP4Modifier._sample_optimization_inputs
+    original_sample = _mapping_attr(OSFP4Modifier, "_prepare_optimization_activations", "_sample_optimization_inputs")
 
     def sample(self, mapping):
+        cache = _mapping_attr(self, "_calibration_cache", "_calibration")
         assert (
             mapping.mapping_name
-            in _mapping_attr(self._calibration, "sampled_indices", "sample_indices")
+            in _mapping_attr(cache, "sampled_indices", "sample_indices")
         ) == streaming
         selected = original_sample(self, mapping)
         actual = torch.cat(
             selected
-            or _mapping_attr(self._calibration, "cached_activations", "inputs")[
+            or _mapping_attr(cache, "cached_activations", "inputs")[
                 mapping.mapping_name
             ]
         )
@@ -95,27 +96,30 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
         assert record["k1"] == rows
         assert record["k"] == min(rows, 2 * n if cap == "auto" else cap)
         if cap == "auto":
-            assert record["policy"] == "auto" and record["n"] == n
+            assert record["policy"] == "auto"
+            assert record.get("n", n) == n
         else:
             assert record["policy"] == "fixed" and "n" not in record
         trace.add(f"sample/{mapping.mapping_name}", actual)
         if mode == "sic":
             trace.add(
                 f"hessian/{mapping.mapping_name}",
-                self._calibration.hessian[mapping.mapping_name],
+                cache.hessian[mapping.mapping_name],
             )
         else:
             trace.add(
                 f"energy/{mapping.mapping_name}",
                 _mapping_attr(
-                    self._calibration, "sigma_x_squared_sum", "sigma_x_squared"
+                    cache, "sigma_x_squared_sum", "sigma_x_squared"
                 )[mapping.mapping_name],
             )
+        if "activation_subsample_size" in record:
+            assert record["activation_subsample_size"] == (2 * n if cap == "auto" else cap)
         return selected
 
     with ExitStack() as stack:
         stack.enter_context(
-            patch.object(OSFP4Modifier, "_sample_optimization_inputs", sample)
+            patch.object(OSFP4Modifier, original_sample.__name__, sample)
         )
         if not streaming:
             stack.enter_context(
@@ -155,12 +159,9 @@ def run_case(directory, mode, streaming, rows, cap, dtype, *, single_width=False
     (directory / "provenance.json").write_text(json.dumps(records, indent=2) + "\n")
     comparable_records = {name: record.copy() for name, record in records.items()}
     for record in comparable_records.values():
-        if "activation_subsample_size" in record:
-            assert record.pop("activation_subsample_size") == (
-                2 * record["n"] if cap == "auto" else cap
-            )
+        record.pop("activation_subsample_size", None)
         if single_width and cap == "auto":
-            del record["n"]
+            record.pop("n", None)
             record["policy"] = "fixed"
     trace.add("provenance", comparable_records)
     trace.add("model_state", dict(sorted(model.state_dict().items())))

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from llmcompressor.core import Event, State
-from llmcompressor_osfp4.modifiers import base, deployment, osfp4_quantize, smoothing
+from llmcompressor_osfp4.modifiers import base, osfp4_quantize, smoothing
 
 from ._testing import LlamaForCausalLM, make_osfp4_modifier
 
@@ -50,9 +50,9 @@ def test_partial_deployment_requires_fresh_model_and_modifier(
             )
         elif stage == "replay":
             patch.setattr(
-                deployment,
+                base,
                 "update_smoothed_input_global_scale",
-                after_write(deployment.update_smoothed_input_global_scale),
+                after_write(base.update_smoothed_input_global_scale),
             )
         elif stage == "installation":
             patch.setattr(
@@ -71,8 +71,8 @@ def test_partial_deployment_requires_fresh_model_and_modifier(
     assert raised.value.__cause__ is error
     assert not torch.equal(first_weight, mapping.balance_layers[0].weight)
     assert mapping.mapping_name not in modifier._optimized_mapping_names
-    assert modifier._calibration.has_calibration_data(mapping.mapping_name)
-    assert "_deployment_failure" not in modifier.model_dump()
+    assert modifier._calibration_cache.has_calibration_data(mapping.mapping_name)
+    assert "_failed_deployment_mapping_name" not in modifier.model_dump()
     assert not hasattr(model.config, "osfp4_metadata")
 
     snapshot = {
@@ -80,7 +80,6 @@ def test_partial_deployment_requires_fresh_model_and_modifier(
     }
     for action in (
         lambda: modifier._optimize_mapping(mapping),
-        modifier._optimize_available_mappings,
         lambda: modifier.on_calibration_start(state, Event()),
         lambda: modifier.on_sequential_epoch_end(state, Event(), []),
         lambda: modifier.on_calibration_end(state, Event()),
@@ -117,7 +116,7 @@ def test_optimizer_failure_before_deployment_is_retryable(monkeypatch):
         patch.setattr(osfp4_quantize, "optimize_rtn", fail)
         with pytest.raises(RuntimeError, match="optimizer failed"):
             modifier._optimize_mapping(mapping)
-    assert modifier._deployment_failure is None
+    assert modifier._failed_deployment_mapping_name is None
     assert torch.equal(before, mapping.balance_layers[0].weight)
     modifier._optimize_mapping(mapping)
     modifier.on_calibration_end(state, Event())

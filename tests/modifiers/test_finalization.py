@@ -75,7 +75,7 @@ def test_repeated_finalize_is_a_byte_exact_noop(
     save = model.save_pretrained
     assert not modifier._resolved_mappings
     assert not modifier._runtime_smoothing_hooks
-    assert not modifier._calibration.token_count
+    assert not modifier._calibration_cache.token_count
 
     def unexpected(*args, **kwargs):
         raise AssertionError("Repeated finalization performed work")
@@ -114,7 +114,7 @@ def test_unfinished_finalize_rejects_deployment_failure():
     modifier = make_osfp4_modifier()
     state = State(model=model)
     modifier.on_initialize(state)
-    modifier._deployment_failure = ("test_mapping", "smoothing")
+    modifier._failed_deployment_mapping_name = "test_mapping"
     save = model.save_pretrained
 
     with pytest.raises(RuntimeError, match="cannot be retried"):

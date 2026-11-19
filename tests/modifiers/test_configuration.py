@@ -287,7 +287,7 @@ def test_modifier_configures_osfp4_local_hessian_offload():
     modifier = make_osfp4_modifier(steps=0, offload_hessians=True)
     modifier.on_initialize(State(model=model))
 
-    assert modifier._calibration.offload_hessians is True
+    assert modifier._calibration_cache.offload_hessians is True
 
 
 @pytest.mark.parametrize(
@@ -359,7 +359,7 @@ def test_auto_uses_twice_shared_input_width_not_combined_output_rows(width):
     mapping = OSFP4Mapping(
         "shared", None, (torch.nn.Linear(width, 3), torch.nn.Linear(width, 5))
     )
-    assert modifier._resolve_activation_subsample_size(mapping) == (2 * width, width)
+    assert modifier._resolve_activation_subsample_size(mapping) == 2 * width
 
 
 def test_auto_rejects_mixed_widths_before_registering_capture_hooks(mocker):
@@ -370,7 +370,7 @@ def test_auto_rejects_mixed_widths_before_registering_capture_hooks(mocker):
     modifier._resolved_mappings.append(
         OSFP4Mapping("mixed", None, (torch.nn.Linear(16, 3), torch.nn.Linear(32, 5)))
     )
-    capture = mocker.spy(modifier._calibration, "make_capture_hook")
+    capture = mocker.spy(modifier._calibration_cache, "make_capture_hook")
     with pytest.raises(ValueError, match="different input widths.*16.*32"):
         modifier.on_calibration_start(state, Event())
     capture.assert_not_called()

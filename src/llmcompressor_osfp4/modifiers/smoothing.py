@@ -28,7 +28,7 @@ def deploy_mapping_smooth_quant_scale(
     scale = scale.reshape(-1).to(device=balance_layers[0].weight.device)
 
     if mapping.requires_runtime_smoothing:
-        return _deploy_runtime_smoothing(balance_layers[0], scale).detach().float()
+        return _deploy_runtime_smoothing(balance_layers[0], scale)
 
     return _deploy_smooth_layer_smoothing(mapping.smooth_layer, balance_layers, scale)
 
@@ -62,14 +62,14 @@ def _deploy_smooth_layer_smoothing(
     return deployed_scale
 
 
-def _deploy_runtime_smoothing(layer: Linear, scale: torch.Tensor) -> Parameter:
-    """Deploy and return a canonical BF16 runtime smoothing scale."""
+def _deploy_runtime_smoothing(layer: Linear, scale: torch.Tensor) -> torch.Tensor:
+    """Store the BF16 scale in smooth_quant_scale and return its FP32 values."""
     if "smooth_quant_scale" in layer._parameters:
         raise RuntimeError("smooth_quant_scale is already registered on balance layer")
 
     deployed_scale = scale.detach().float().to(torch.bfloat16)
     weight = layer.weight.detach().clone()
-    weight /= deployed_scale.float().to(weight).view(1, -1)
+    weight /= deployed_scale.to(weight).view(1, -1)
     update_offload_parameter(layer, "weight", weight)
 
     deployed_scale = Parameter(
@@ -77,7 +77,7 @@ def _deploy_runtime_smoothing(layer: Linear, scale: torch.Tensor) -> Parameter:
         requires_grad=False,
     )
     layer.register_parameter("smooth_quant_scale", deployed_scale)
-    return deployed_scale
+    return deployed_scale.detach().float()
 
 
 def update_smoothed_input_global_scale(

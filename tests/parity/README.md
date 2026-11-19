@@ -23,7 +23,7 @@ To check every production Python file in the public calibration package against 
 python3 tests/parity/check_source.py /path/to/llm-compressor-for-osfp4
 ```
 
-The checker compares shared modules byte for byte after translating package imports. It lists the files for stock LLM Compressor integration and each deployment format, and fails on unexpected public files.
+The checker compares shared modules byte for byte after translating package imports. In the adapted modifier and smoothing modules it checks shared field names, method signatures, and the bodies of shared calibration methods. It also checks for unexpected public files.
 
 The tensor comparison covers a two-layer Qwen3 model with grouped attention in
 NVFP4 and NVFP4A16, each with RTN and SIC. It checks the input state, sampled
